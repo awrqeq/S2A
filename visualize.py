@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 
 from core.utils import load_config
-from core.attack import S2A_Injector
+from core.attack import S2A_Ultimate_Injector as S2A_Injector
 
 
 def main(args):

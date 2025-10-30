@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from torchvision import datasets, transforms
 from torch.utils.data import Dataset
-from .attack import S2A_Injector
+from .attack import S2A_Ultimate_Injector as S2A_Injector
 
 
 class PoisonedCifar10(Dataset):

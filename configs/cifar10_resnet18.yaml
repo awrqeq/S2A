@@ -40,14 +40,23 @@ attack:
 
   # --- S2A 核心参数 ---
   wavelet: 'db4'        # WPD 使用的小波基 (e.g., 'db1', 'haar')
-  subband: 'hh'         # 要注入的子带: 'hh', 'hl', 'lh', 'll'
+  subband: ['hl']         # 要注入的子带: 'hh', 'hl', 'lh', 'll'
 
   s2a:
-    injection_ratio: 0.2
-    window_size: 8
-    n_components: 2
-    trigger_type: 'sine'
-    trigger_freq: 7
+    injection_ratio: 0.1
+    trigger_type: 'sine' # 1D 触发器类型
+
+    # --- 1D SSA 参数 ---
+    window_size_1d: 8
+    n_components_1d: 4
+    trigger_freq: 4      # 1D 触发器频率
+
+    # --- [新增] 2D SSA 参数 ---
+    window_size_2d_h: 4  # 2D 窗口高度 (for HH)
+    window_size_2d_w: 4  # 2D 窗口宽度 (for HH)
+    n_components_2d: 5   # 2D 主成分数量 (for HH)
+    trigger_freq_2d_h: 4 # 2D 触发器垂直频率
+    trigger_freq_2d_w: 4 # 2D 触发器水平频率
 
 # ---------------------------------
 # 日志配置
