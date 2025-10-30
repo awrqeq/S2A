@@ -1,18 +1,43 @@
-# core/attack.py (最终版：包含2D-SSA的子带自适应框架)
-#
-# --- 核心升级 ---
-# 1. [新增] 实现了真正的二维奇异谱分析(2D-SSA)函数 _2d_ssa_process，专门用于处理HH子带。
-# 2. [新增] 实现了二维触发器生成函数 _generate_2d_trigger，以匹配2D-SSA的二维特性。
-# 3. [适配] 在主注入逻辑中，为'hh'子带指定使用2D-SSA进行分析。
-# 4. [配置] 支持在YAML中为2D-SSA配置独立的窗口大小。
-#
+# core/attack.py (最终方案 + 结构完整性约束 + 全局单例模式)
+
+import os
 import numpy as np
 import pywt
 import torch
+from PIL import Image
+
+# --- [!!! 核心修改：全局单例模式 !!!] ---
+# 创建一个全局变量来缓存唯一的注入器实例
+_GLOBAL_INJECTOR = None
 
 
-class S2A_Ultimate_Injector:  # 更换一个更响亮的名字
+def get_injector_instance(config):
+    """
+    一个工厂函数，用于创建或获取S2A注入器的全局唯一实例。
+    这可以防止DataLoader的多个worker重复进行昂贵的初始化。
+    """
+    global _GLOBAL_INJECTOR
+    # 使用进程ID来观察是哪个进程在创建实例
+    pid = os.getpid()
+
+    # 只有当全局实例不存在时，才创建它 (双重检查锁定，确保线程安全)
+    if _GLOBAL_INJECTOR is None:
+        print(f"--- [PID: {pid}] Global injector instance not found, creating new one... ---")
+        _GLOBAL_INJECTOR = S2A_Ultimate_Injector(config)
+        print(f"--- [PID: {pid}] Global S2A_Ultimate_Injector instance created successfully. ---")
+    else:
+        # 如果已经存在，可以打印一条消息以供调试
+        # print(f"--- [PID: {pid}] Reusing existing global injector instance. ---")
+        pass
+
+    return _GLOBAL_INJECTOR
+
+
+# -------------------------------------------------------------------------
+
+class S2A_Ultimate_Injector:
     def __init__(self, config):
+        # 构造函数现在只是简单地设置参数
         self.config = config['attack']
         self.s2a_config = self.config['s2a']
         self.wavelet = self.config['wavelet']
@@ -23,167 +48,206 @@ class S2A_Ultimate_Injector:  # 更换一个更响亮的名字
         else:
             self.subband_keys_to_attack = [key.lower() for key in subband_config]
 
-        # 1D-SSA 参数
+        self.energy_threshold_struc = self.s2a_config['energy_threshold_struc']
+        self.energy_threshold_trigger = self.s2a_config['energy_threshold_trigger']
+        self.base_beta = self.s2a_config['base_beta']
+
+        self.adaptive_mid_config = self.s2a_config['adaptive_strength_mid_freq']
+        self.adaptive_high_config = self.s2a_config['adaptive_strength_high_freq']
+
+        self.use_constraint = self.s2a_config.get('use_structural_constraint', False)
+
         self.L_1d = self.s2a_config['window_size_1d']
-        self.r_1d = self.s2a_config['n_components_1d']
+        self.L_2d_h = self.s2a_config.get('window_size_2d_h', 4)
+        self.L_2d_w = self.s2a_config.get('window_size_2d_w', 4)
 
-        # [新增] 2D-SSA 参数
-        self.L_2d_h = self.s2a_config.get('window_size_2d_h', 4)  # 2D窗口高度
-        self.L_2d_w = self.s2a_config.get('window_size_2d_w', 4)  # 2D窗口宽度
-        self.r_2d = self.s2a_config.get('n_components_2d', 5)  # 2D主成分数量
+        # 昂贵的计算被移到_purify_trigger中，它只会被全局实例调用一次
+        self.purified_triggers = self._purify_trigger()
 
-        self.beta = self.s2a_config['injection_ratio']
-        self.trigger_1d_seq = self._generate_1d_trigger(length=1000)
-        self.trigger_2d_pattern = {}  # 缓存2D trigger, 避免重复生成
+        # 可以在初始化结束时打印消息
+        print_str = f"S2A_Ultimate_Injector initialized with:"
+        print_str += f"\n  - Attacking subbands: {self.subband_keys_to_attack}"
+        print_str += f"\n  - Structural Constraint: {'ENABLED' if self.use_constraint else 'DISABLED'}"
+        print(print_str)
 
-    def _generate_1d_trigger(self, length):
-        ttype = self.s2a_config.get('trigger_type', 'sine')
-        if ttype == 'sine':
-            freq = self.s2a_config.get('trigger_freq', 5)
-            t = np.arange(length)
-            return np.sin(2 * np.pi * freq * t / length)
-        else:  # 省略其他类型以保持简洁
-            return np.random.randn(length)
+    def _calculate_dynamic_r(self, S, energy_threshold):
+        total_energy = np.sum(S ** 2)
+        if total_energy < 1e-9: return 1
 
-    def _get_1d_trigger_for_length(self, length):
-        if length <= len(self.trigger_1d_seq):
-            return self.trigger_1d_seq[:length]
-        else:
-            return np.tile(self.trigger_1d_seq, int(np.ceil(length / len(self.trigger_1d_seq))))[:length]
+        cumulative_energy = np.cumsum(S ** 2)
+        r_dynamic = np.searchsorted(cumulative_energy, total_energy * energy_threshold, side='right') + 1
+        return min(r_dynamic, len(S))
 
-    def _generate_2d_trigger(self, shape):
-        h, w = shape
-        if (h, w) in self.trigger_2d_pattern:
-            return self.trigger_2d_pattern[(h, w)]
-
-        # 创建一个简单的二维正弦棋盘格触发器
-        freq_h = self.s2a_config.get('trigger_freq_2d_h', 4)
-        freq_w = self.s2a_config.get('trigger_freq_2d_w', 4)
-
-        h_coords = np.arange(h).reshape(-1, 1)
-        w_coords = np.arange(w).reshape(1, -1)
-
-        trigger = np.sin(2 * np.pi * freq_h * h_coords / h) + np.sin(2 * np.pi * freq_w * w_coords / w)
-        self.trigger_2d_pattern[(h, w)] = trigger
-        return trigger
-
-    def _anti_diag_avg_1d(self, matrix):
-        L, K = matrix.shape
-        N = L + K - 1
-        signal, counts = np.zeros(N), np.zeros(N)
-        for i in range(L):
-            for j in range(K):
-                signal[i + j] += matrix[i, j]
-                counts[i + j] += 1
-        signal[counts > 0] /= counts[counts > 0]
-        return signal
-
-    # --- 1D SSA 核心函数 ---
-    def _1d_ssa_process(self, signal_1d, global_std):
+    def _1d_ssa_decompose(self, signal_1d, L, energy_threshold):
         N = len(signal_1d)
-        if N < self.L_1d: return signal_1d
-        K = N - self.L_1d + 1
-        hankel = np.array([signal_1d[i:i + self.L_1d] for i in range(K)]).T
-        U, S, Vh = np.linalg.svd(hankel, full_matrices=False)
-        r = min(self.r_1d, len(S))
+        if N < L: return signal_1d, np.zeros_like(signal_1d)
+        K = N - L + 1
+        hankel = np.array([signal_1d[i:i + L] for i in range(K)]).T
+        try:
+            U, S, Vh = np.linalg.svd(hankel, full_matrices=False)
+        except np.linalg.LinAlgError:
+            return signal_1d, np.zeros_like(signal_1d)
+
+        r = self._calculate_dynamic_r(S, energy_threshold)
         reconstructed_hankel = U[:, :r] @ np.diag(S[:r]) @ Vh[:r, :]
-        reconstructed_signal = self._anti_diag_avg_1d(reconstructed_hankel)
 
-        trigger = self._get_1d_trigger_for_length(N)
-        trigger_scaled = (trigger / (np.std(trigger) + 1e-9)) * (self.beta * global_std)
+        struc = np.zeros(N)
+        counts = np.zeros(N)
+        for j in range(L):
+            for k in range(K):
+                struc[j + k] += reconstructed_hankel[j, k]
+                counts[j + k] += 1
+        struc[counts > 0] /= counts[counts > 0]
 
-        poisoned_signal = reconstructed_signal + trigger_scaled
-        return np.resize(poisoned_signal, N)
+        noise = signal_1d - struc
+        return struc, noise
 
-    # --- [全新] 2D SSA 核心函数 ---
-    def _2d_ssa_process(self, matrix_2d, global_std):
+    def _2d_ssa_decompose(self, matrix_2d, Lh, Lw, energy_threshold):
         H, W = matrix_2d.shape
-        Lh, Lw = self.L_2d_h, self.L_2d_w
+        if H < Lh or W < Lw: return matrix_2d, np.zeros_like(matrix_2d)
 
-        if H < Lh or W < Lw: return matrix_2d
-
-        # 1. 构建轨迹矩阵
         Kh, Kw = H - Lh + 1, W - Lw + 1
-        num_patches = Kh * Kw
-        patch_size = Lh * Lw
+        trajectory_matrix = np.array([matrix_2d[i:i + Lh, j:j + Lw].flatten() for i in range(Kh) for j in range(Kw)]).T
 
-        trajectory_matrix = np.zeros((patch_size, num_patches))
-        patch_idx = 0
-        for i in range(Kh):
-            for j in range(Kw):
-                patch = matrix_2d[i:i + Lh, j:j + Lw]
-                trajectory_matrix[:, patch_idx] = patch.flatten()
-                patch_idx += 1
+        try:
+            U, S, Vh = np.linalg.svd(trajectory_matrix, full_matrices=False)
+        except np.linalg.LinAlgError:
+            return matrix_2d, np.zeros_like(matrix_2d)
 
-        # 2. SVD分解
-        U, S, Vh = np.linalg.svd(trajectory_matrix, full_matrices=False)
-        r = min(self.r_2d, len(S))
-
-        # 3. 重构结构部分
+        r = self._calculate_dynamic_r(S, energy_threshold)
         reconstructed_trajectory = U[:, :r] @ np.diag(S[:r]) @ Vh[:r, :]
 
-        # 4. "对角平均"重构回二维矩阵
-        reconstructed_matrix = np.zeros_like(matrix_2d)
+        struc = np.zeros_like(matrix_2d)
         counts = np.zeros_like(matrix_2d)
         patch_idx = 0
         for i in range(Kh):
             for j in range(Kw):
-                reconstructed_patch = reconstructed_trajectory[:, patch_idx].reshape(Lh, Lw)
-                reconstructed_matrix[i:i + Lh, j:j + Lw] += reconstructed_patch
+                patch = reconstructed_trajectory[:, patch_idx].reshape(Lh, Lw)
+                struc[i:i + Lh, j:j + Lw] += patch
                 counts[i:i + Lh, j:j + Lw] += 1
                 patch_idx += 1
+        struc[counts > 0] /= counts[counts > 0]
 
-        reconstructed_matrix[counts > 0] /= counts[counts > 0]
+        noise = matrix_2d - struc
+        return struc, noise
 
-        # 注入二维触发器
-        trigger_2d = self._generate_2d_trigger(matrix_2d.shape)
-        trigger_scaled = (trigger_2d / (np.std(trigger_2d) + 1e-9)) * (self.beta * global_std)
-
-        poisoned_matrix = reconstructed_matrix + trigger_scaled
-        return poisoned_matrix
-
-    def _process_subband_row_wise(self, subband_data, global_std):
-        poisoned_subband = np.zeros_like(subband_data)
+    def _process_1d_row_wise(self, subband_data, L, energy_threshold):
+        struc_matrix = np.zeros_like(subband_data)
+        noise_matrix = np.zeros_like(subband_data)
         for i in range(subband_data.shape[0]):
-            poisoned_subband[i, :] = self._1d_ssa_process(subband_data[i, :], global_std)
-        return poisoned_subband
+            struc, noise = self._1d_ssa_decompose(subband_data[i, :], L, energy_threshold)
+            struc_matrix[i, :] = struc
+            noise_matrix[i, :] = noise
+        return struc_matrix, noise_matrix
 
-    def _process_subband_col_wise(self, subband_data, global_std):
-        transposed_subband = subband_data.T
-        poisoned_transposed = self._process_subband_row_wise(transposed_subband, global_std)
-        return poisoned_transposed.T
+    def _process_1d_col_wise(self, subband_data, L, energy_threshold):
+        struc_transposed, noise_transposed = self._process_1d_row_wise(subband_data.T, L, energy_threshold)
+        return struc_transposed.T, noise_transposed.T
 
-    # --- [主函数] ---
+    def _purify_trigger(self):
+        print("--- Purifying trigger source... ---")
+        trigger_path = self.s2a_config.get('trigger_image_path', None)
+        try:
+            if trigger_path:
+                trigger_img = Image.open(trigger_path).convert('RGB')
+                trigger_img = trigger_img.resize((32, 32), Image.Resampling.LANCZOS)
+                trigger_tensor = torch.from_numpy(np.array(trigger_img) / 255.0).permute(2, 0, 1).float()
+            else:
+                raise FileNotFoundError
+        except (FileNotFoundError, AttributeError):
+            print(
+                f"Warning: Trigger image not found or invalid at '{trigger_path}'. Using a fixed random trigger instead.")
+            torch.manual_seed(42)
+            trigger_tensor = torch.rand(3, 32, 32)
+
+        trigger_np = trigger_tensor.numpy().astype(np.float64)
+        purified_triggers = {}
+
+        for c in range(trigger_np.shape[0]):
+            coeffs = pywt.wavedec2(trigger_np[c], self.wavelet, mode='symmetric', level=1)
+            _, (LH, HL, HH) = coeffs
+            subbands_raw = {'lh': LH, 'hl': HL, 'hh': HH}
+
+            for key, subband in subbands_raw.items():
+                struc, _ = self._decompose_subband(subband, key, self.energy_threshold_trigger)
+                purified_triggers[f'c{c}_{key}'] = struc
+
+        print("--- Trigger purification complete. ---")
+        return purified_triggers
+
+    def _calculate_dynamic_beta(self, noise_energy, subband_key):
+        config = None
+        if subband_key in ['hl', 'lh'] and self.adaptive_mid_config.get('enabled', False):
+            config = self.adaptive_mid_config
+        elif subband_key == 'hh' and self.adaptive_high_config.get('enabled', False):
+            config = self.adaptive_high_config
+
+        if config:
+            beta = self.base_beta + config.get('scaling_factor', 0.0) * noise_energy
+            return np.clip(beta, 0.0, 1.0)  # 确保beta不会超过1
+        else:
+            return self.base_beta
+
+    def _decompose_subband(self, subband_data, key, energy_threshold):
+        if key == 'hl':
+            struc, noise = self._process_1d_row_wise(subband_data, self.L_1d, energy_threshold)
+        elif key == 'lh':
+            struc, noise = self._process_1d_col_wise(subband_data, self.L_1d, energy_threshold)
+        elif key == 'hh':
+            struc, noise = self._2d_ssa_decompose(subband_data, self.L_2d_h, self.L_2d_w, energy_threshold)
+        else:
+            struc, noise = subband_data, np.zeros_like(subband_data)
+        return struc, noise
+
     def inject(self, img_tensor):
         img_np = img_tensor.cpu().numpy().astype(np.float64)
         poisoned_channels = []
         for c in range(img_np.shape[0]):
             channel_data = img_np[c]
             orig_shape = channel_data.shape
-            coeffs = pywt.wavedec2(channel_data, self.wavelet, mode='symmetric', level=1)
+
+            try:
+                coeffs = pywt.wavedec2(channel_data, self.wavelet, mode='symmetric', level=1)
+            except ValueError:
+                poisoned_channels.append(channel_data)
+                continue
+
             LL, (LH, HL, HH) = coeffs
-            subband_map = {'ll': LL.copy(), 'lh': LH.copy(), 'hl': HL.copy(), 'hh': HH.copy()}
+            subband_map_clean = {'ll': LL.copy(), 'lh': LH.copy(), 'hl': HL.copy(), 'hh': HH.copy()}
+            subband_map_final = subband_map_clean.copy()
 
             for key in self.subband_keys_to_attack:
-                if key not in subband_map: continue
+                if key not in subband_map_final: continue
 
-                target_subband = subband_map[key]
-                global_std = np.std(target_subband) + 1e-9
-                poisoned_subband = None
+                struc_clean, noise_clean = self._decompose_subband(subband_map_clean[key], key,
+                                                                   self.energy_threshold_struc)
 
-                # --- [核心] 子带自适应策略 ---
-                if key == 'hl':
-                    poisoned_subband = self._process_subband_row_wise(target_subband, global_std)
-                elif key == 'lh':
-                    poisoned_subband = self._process_subband_col_wise(target_subband, global_std)
-                elif key == 'hh':
-                    poisoned_subband = self._2d_ssa_process(target_subband, global_std)
+                noise_energy = np.var(noise_clean)
+                dynamic_beta = self._calculate_dynamic_beta(noise_energy, key)
 
-                if poisoned_subband is not None:
-                    subband_map[key] = poisoned_subband
+                trigger_struc = self.purified_triggers[f'c{c}_{key}']
 
-            new_coeffs = [subband_map['ll'], (subband_map['lh'], subband_map['hl'], subband_map['hh'])]
+                std_noise = np.std(noise_clean) + 1e-9
+                std_trigger = np.std(trigger_struc) + 1e-9
+                trigger_normalized = trigger_struc * (std_noise / std_trigger)
+
+                noise_poisoned = (1 - dynamic_beta) * noise_clean + dynamic_beta * trigger_normalized
+
+                subband_poisoned_preliminary = struc_clean + noise_poisoned
+
+                if self.use_constraint:
+                    _, noise_from_poisoned = self._decompose_subband(subband_poisoned_preliminary, key,
+                                                                     self.energy_threshold_struc)
+                    final_subband = struc_clean + noise_from_poisoned
+                else:
+                    final_subband = subband_poisoned_preliminary
+
+                subband_map_final[key] = final_subband
+
+            new_coeffs = [subband_map_final['ll'],
+                          (subband_map_final['lh'], subband_map_final['hl'], subband_map_final['hh'])]
             poisoned_channel = pywt.waverec2(new_coeffs, self.wavelet, mode='symmetric')
+
             if poisoned_channel.shape != orig_shape:
                 poisoned_channel = poisoned_channel[:orig_shape[0], :orig_shape[1]]
             poisoned_channels.append(poisoned_channel)

@@ -1,3 +1,5 @@
+# configs/cifar10_resnet18.yaml (最终修复版 - 包含了所有必需的训练参数)
+
 # ---------------------------------
 # 数据集配置
 # ---------------------------------
@@ -5,18 +7,18 @@ dataset:
   name: 'cifar10'
   data_path: './data'
   num_classes: 10
-  # CIFAR-10 均值和标准差
   mean: [0.4914, 0.4822, 0.4465]
   std: [0.2023, 0.1994, 0.2010]
 
 # ---------------------------------
-# 训练配置
+# 训练配置 [!!! 已修复和补全 !!!]
 # ---------------------------------
 train:
   epochs: 100
   batch_size: 1024       # 这是每个GPU的 batch_size
   optimizer: 'sgd'
-  learning_rate: 0.1
+  # [!!! 补全 !!!] 优化器和学习率调度器所需的全部参数
+  learning_rate: 0.01
   momentum: 0.9
   weight_decay: 5.0e-4
   scheduler: 'cosine'   # 使用余弦退火学习率
@@ -25,41 +27,37 @@ train:
 # DDP (多GPU) 配置
 # ---------------------------------
 ddp:
-  # 查找一个空闲端口
   dist_url: 'tcp://127.0.0.1:23456'
   dist_backend: 'nccl'
   multiprocessing_distributed: True
-  # world_size 和 rank 会被主脚本自动设置
 
 # ---------------------------------
 # S2A 攻击配置
 # ---------------------------------
 attack:
-  poison_rate: 0.1      # 训练集投毒比例
-  target_label: 0       # 目标标签 (例如 0: airplane)
+  poison_rate: 0.1
+  target_label: 0
 
-  # --- S2A 核心参数 ---
-  wavelet: 'db4'        # WPD 使用的小波基 (e.g., 'db1', 'haar')
-  subband: ['hl']         # 要注入的子带: 'hh', 'hl', 'lh', 'll'
+  wavelet: 'db4'
+  subband: ['hl', 'lh', 'hh']
 
   s2a:
-    injection_ratio: 0.1
-    trigger_type: 'sine' # 1D 触发器类型
+    use_structural_constraint: true
+    trigger_image_path: './trigger_source.png'
 
-    # --- 1D SSA 参数 ---
+    energy_threshold_trigger: 0.80
+    energy_threshold_struc: 0.95
+
+    base_beta: 0.3
+
+    adaptive_strength_mid_freq:
+      enabled: true
+      scaling_factor: 15000.0
+
+    adaptive_strength_high_freq:
+      enabled: true
+      scaling_factor: 150000.0
+
     window_size_1d: 8
-    n_components_1d: 4
-    trigger_freq: 4      # 1D 触发器频率
-
-    # --- [新增] 2D SSA 参数 ---
-    window_size_2d_h: 4  # 2D 窗口高度 (for HH)
-    window_size_2d_w: 4  # 2D 窗口宽度 (for HH)
-    n_components_2d: 5   # 2D 主成分数量 (for HH)
-    trigger_freq_2d_h: 4 # 2D 触发器垂直频率
-    trigger_freq_2d_w: 4 # 2D 触发器水平频率
-
-# ---------------------------------
-# 日志配置
-# ---------------------------------
-log:
-  log_interval: 50      # 每 50 个 batch 打印一次日志
+    window_size_2d_h: 4
+    window_size_2d_w: 4

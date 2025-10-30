@@ -68,7 +68,7 @@ def main_worker(gpu, ngpus_per_node, config):
         batch_size=config['train']['batch_size'],
         shuffle=(train_sampler is None),
         sampler=train_sampler,
-        num_workers=4,
+        num_workers=32,
         pin_memory=True
     )
 
@@ -77,12 +77,12 @@ def main_worker(gpu, ngpus_per_node, config):
         val_clean_dataset = PoisonedCifar10(config, train=False, poison=False)
         val_clean_loader = DataLoader(val_clean_dataset,
                                       batch_size=config['train']['batch_size'] * 2,
-                                      shuffle=False, num_workers=4)
+                                      shuffle=False, num_workers=32)
 
         val_asr_dataset = PoisonedCifar10(config, train=False, asr_eval=True)
         val_asr_loader = DataLoader(val_asr_dataset,
                                     batch_size=config['train']['batch_size'] * 2,
-                                    shuffle=False, num_workers=4)
+                                    shuffle=False, num_workers=32)
 
     model = ModelToUse(num_classes=config['dataset']['num_classes']).cuda(gpu)
     if use_ddp:
