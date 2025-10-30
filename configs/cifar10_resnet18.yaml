@@ -1,0 +1,56 @@
+# ---------------------------------
+# 数据集配置
+# ---------------------------------
+dataset:
+  name: 'cifar10'
+  data_path: './data'
+  num_classes: 10
+  # CIFAR-10 均值和标准差
+  mean: [0.4914, 0.4822, 0.4465]
+  std: [0.2023, 0.1994, 0.2010]
+
+# ---------------------------------
+# 训练配置
+# ---------------------------------
+train:
+  epochs: 100
+  batch_size: 1024       # 这是每个GPU的 batch_size
+  optimizer: 'sgd'
+  learning_rate: 0.1
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  scheduler: 'cosine'   # 使用余弦退火学习率
+
+# ---------------------------------
+# DDP (多GPU) 配置
+# ---------------------------------
+ddp:
+  # 查找一个空闲端口
+  dist_url: 'tcp://127.0.0.1:23456'
+  dist_backend: 'nccl'
+  multiprocessing_distributed: True
+  # world_size 和 rank 会被主脚本自动设置
+
+# ---------------------------------
+# S2A 攻击配置
+# ---------------------------------
+attack:
+  poison_rate: 0.1      # 训练集投毒比例
+  target_label: 0       # 目标标签 (例如 0: airplane)
+
+  # --- S2A 核心参数 ---
+  wavelet: 'db4'        # WPD 使用的小波基 (e.g., 'db1', 'haar')
+  subband: 'hh'         # 要注入的子带: 'hh', 'hl', 'lh', 'll'
+
+  s2a:
+    injection_ratio: 0.2
+    window_size: 8
+    n_components: 2
+    trigger_type: 'sine'
+    trigger_freq: 7
+
+# ---------------------------------
+# 日志配置
+# ---------------------------------
+log:
+  log_interval: 50      # 每 50 个 batch 打印一次日志
