@@ -1,4 +1,4 @@
-# core/dataset.py (最终方案 + 全局单例模式)
+# core/dataset.py (已修改 ASR-Eval 逻辑)
 
 import torch
 import numpy as np
@@ -44,9 +44,23 @@ class PoisonedCifar10(Dataset):
 
         if self.poison:
             self._setup_train_poisoning()
+
+        # [!!! 核心修改：ASR 评估逻辑 !!!]
         elif self.asr_eval:
+            # 1. 找到所有非目标图像的索引
             all_indices = np.arange(len(self.targets))
-            self.poison_indices = all_indices[self.targets != self.target_label]
+            non_target_mask = (self.targets != self.target_label)
+            non_target_indices = all_indices[non_target_mask]
+
+            # 2. [!!!] 重新过滤 self.data 和 self.targets
+            #    只保留那 9000 张非目标图像 (或训练集对应的非目标图像)
+            self.data = self.data[non_target_indices]
+            self.targets = self.targets[non_target_indices]
+
+            # 3. 现在，poison_indices 应该包含 *所有* 剩余的图像 (0到8999)
+            self.poison_indices = np.arange(len(self.targets))
+
+            # (现在这个 dataset 的 __len__ 将返回 9000)
 
     def _setup_train_poisoning(self):
         poison_rate = self.config['attack']['poison_rate']
@@ -62,6 +76,9 @@ class PoisonedCifar10(Dataset):
     def __getitem__(self, idx):
         img, label = self.data[idx], self.targets[idx]
         img_tensor = transforms.functional.to_tensor(img)
+
+        # [!!!] 这个逻辑现在对于 asr_eval 会始终为 True
+        # 因为 self.poison_indices 包含了所有索引 (0 到 len-1)
         is_poison = (self.poison or self.asr_eval) and (idx in self.poison_indices)
 
         if is_poison:

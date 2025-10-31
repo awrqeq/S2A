@@ -95,8 +95,7 @@ def main_worker(gpu, ngpus_per_node, config):
                           momentum=config['train']['momentum'],
                           weight_decay=config['train']['weight_decay'])
 
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=config['train']['epochs'])
+    scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[50, 100, 150, 200, 250], gamma=0.1)
 
     if is_main_process:
         logging.info("--- 开始训练 ---")

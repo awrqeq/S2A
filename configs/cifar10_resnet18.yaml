@@ -1,4 +1,4 @@
-# configs/cifar10_resnet18.yaml (最终方案)
+# configs/cifar10_resnet18.yaml (最终方案 - 动态算法 + 最优注入)
 
 # --- (dataset, train, ddp 部分保持不变) ---
 dataset:
@@ -9,13 +9,13 @@ dataset:
   std: [0.2023, 0.1994, 0.2010]
 
 train:
-  epochs: 100
-  batch_size: 1024
+  epochs: 300
+  batch_size: 256
   optimizer: 'sgd'
-  learning_rate: 0.01
+  learning_rate: 0.05
   momentum: 0.9
   weight_decay: 5.0e-4
-  scheduler: 'cosine'
+  scheduler: 'step'
 
 ddp:
   dist_url: 'tcp://127.0.0.1:23456'
@@ -30,7 +30,10 @@ attack:
   target_label: 0
 
   wavelet: 'db4'
-  subband: ['hh']
+
+  # [!!! 推荐 !!!] 既然 HL/LH 逻辑已修复, 您可以尝试攻击它们了
+  subband: ['hl', 'lh', 'hh']
+  # subband: ['hh'] # (或者只保留hh)
 
   s2a:
     # --- [王牌] 结构完整性约束开关 ---
@@ -39,15 +42,13 @@ attack:
     # --- 触发器源 ---
     trigger_image_path: './trigger_source.png'
 
-    # --- SSA核心参数 ---
-    energy_threshold_trigger: 0.80  # 提纯触发器时保留80%能量
-    energy_threshold_struc: 0.95    # 分析干净图片时保留95%能量
+    energy_ratio_to_noise: 0.4
 
-    # --- [最终] 注入强度控制 ---
-
-    energy_ratio_to_structure: 0.04
     blend_ratio_in_noise: 0.8 # 80%来自触发器模式, 20%保留原始噪声
 
+    min_trigger_norm_hl: 0.078294
+    min_trigger_norm_lh: 0.076678
+    min_trigger_norm_hh: 0.005808
     # --- 底层SSA参数 ---
     window_size_1d: 8
     window_size_2d_h: 4

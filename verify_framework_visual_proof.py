@@ -1,18 +1,27 @@
-# verify_framework_visual_proof_fixed.py
+# verify_framework_visual_proof_fixed.py (已修复HL/LH方向 + 动态算法)
 import torchvision
 import numpy as np
 import pywt
 import matplotlib.pyplot as plt
 
-def _calculate_dynamic_r(S, energy_threshold):
-    total_energy = np.sum(S ** 2)
-    if total_energy < 1e-9:
-        return 1
-    cumulative_energy = np.cumsum(S ** 2)
-    r_dynamic = np.searchsorted(cumulative_energy, total_energy * energy_threshold, side='right') + 1
+
+def _calculate_dynamic_r_by_gap(S, min_rank=1):
+    """
+    [!!! 核心修改 !!!]
+    通过寻找奇异值对数谱图的最大“落差”（拐点）来动态确定秩r。
+    """
+    if len(S) <= min_rank:
+        return len(S)
+    log_S = np.log(S + 1e-12)
+    gaps = log_S[:-1] - log_S[1:]
+    if len(gaps[min_rank:]) == 0:
+        return min_rank
+    best_gap_index = np.argmax(gaps[min_rank:]) + min_rank
+    r_dynamic = best_gap_index + 1
     return min(r_dynamic, len(S))
 
-def _1d_ssa_decompose(signal_1d, L, energy_threshold):
+
+def _1d_ssa_decompose(signal_1d, L):
     N = len(signal_1d)
     if N < L:
         return signal_1d.copy(), np.zeros_like(signal_1d)
@@ -22,7 +31,10 @@ def _1d_ssa_decompose(signal_1d, L, energy_threshold):
         U, S, Vh = np.linalg.svd(hankel, full_matrices=False)
     except np.linalg.LinAlgError:
         return signal_1d.copy(), np.zeros_like(signal_1d)
-    r = _calculate_dynamic_r(S, energy_threshold)
+
+    # [!!! 核心修改 !!!]
+    r = _calculate_dynamic_r_by_gap(S)
+
     reconstructed_hankel = U[:, :r] @ np.diag(S[:r]) @ Vh[:r, :]
     struc = np.zeros(N)
     counts = np.zeros(N)
@@ -35,7 +47,8 @@ def _1d_ssa_decompose(signal_1d, L, energy_threshold):
     struc[mask] /= counts[mask]
     return struc, signal_1d - struc
 
-def _2d_ssa_decompose(matrix_2d, Lh, Lw, energy_threshold):
+
+def _2d_ssa_decompose(matrix_2d, Lh, Lw):
     H, W = matrix_2d.shape
     if H < Lh or W < Lw:
         return matrix_2d.copy(), np.zeros_like(matrix_2d)
@@ -47,7 +60,10 @@ def _2d_ssa_decompose(matrix_2d, Lh, Lw, energy_threshold):
         U, S, Vh = np.linalg.svd(trajectory_matrix, full_matrices=False)
     except np.linalg.LinAlgError:
         return matrix_2d.copy(), np.zeros_like(matrix_2d)
-    r = _calculate_dynamic_r(S, energy_threshold)
+
+    # [!!! 核心修改 !!!]
+    r = _calculate_dynamic_r_by_gap(S)
+
     reconstructed_trajectory = U[:, :r] @ np.diag(S[:r]) @ Vh[:r, :]
     struc = np.zeros_like(matrix_2d)
     counts = np.zeros_like(matrix_2d)
@@ -62,15 +78,16 @@ def _2d_ssa_decompose(matrix_2d, Lh, Lw, energy_threshold):
     struc[mask] /= counts[mask]
     return struc, matrix_2d - struc
 
+
 def main():
     IMAGE_IDX = 8
     WAVELET = 'db4'
-    ENERGY_THRESHOLD = 0.85
+    # ENERGY_THRESHOLD = 0.85 (已废弃)
     L_1D = 8
     L_2D_H, L_2D_W = 4, 4
     AMPLIFICATION = 20
 
-    params = {'wavelet': WAVELET, 'energy_th': ENERGY_THRESHOLD, 'L_1d': L_1D, 'L_2d_h': L_2D_H, 'L_2d_w': L_2D_W}
+    params = {'wavelet': WAVELET, 'L_1d': L_1D, 'L_2d_h': L_2D_H, 'L_2d_w': L_2D_W}
 
     dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=None)
     pil_image, _ = dataset[IMAGE_IDX]
@@ -78,8 +95,6 @@ def main():
     H, W = image_np_gray.shape
 
     coeffs_original = pywt.wavedec2(image_np_gray, WAVELET, mode='symmetric', level=1)
-    # IMPORTANT: pywt returns (cA, (cH, cV, cD)) where cH=HL (horizontal details),
-    # cV=LH (vertical details). So unpack correctly:
     LL, (HL_orig, LH_orig, HH_orig) = coeffs_original
     baseline_img = np.clip(pywt.waverec2(coeffs_original, WAVELET, mode='symmetric')[:H, :W], 0.0, 1.0)
 
@@ -91,21 +106,23 @@ def main():
         struc = np.zeros_like(original_subband)
         noise = np.zeros_like(original_subband)
 
-        if key == 'hl':
-            # HL: horizontal details -> decompose rows (each row is horizontal signal)
+        # [!!! 核心逻辑修复 !!!]
+        if key == 'lh':
+            # LH (水平细节) -> 按行 (row) 分解
             for i in range(original_subband.shape[0]):
-                s, n = _1d_ssa_decompose(original_subband[i, :], params['L_1d'], params['energy_th'])
+                s, n = _1d_ssa_decompose(original_subband[i, :], params['L_1d'])
                 struc[i, :], noise[i, :] = s, n
-        elif key == 'lh':
-            # LH: vertical details -> decompose columns (each column is vertical signal)
+        elif key == 'hl':
+            # HL (垂直细节) -> 按列 (column) 分解
             for i in range(original_subband.shape[1]):
-                s, n = _1d_ssa_decompose(original_subband[:, i], params['L_1d'], params['energy_th'])
+                s, n = _1d_ssa_decompose(original_subband[:, i], params['L_1d'])
                 struc[:, i], noise[:, i] = s, n
         elif key == 'hh':
-            struc, noise = _2d_ssa_decompose(original_subband, params['L_2d_h'], params['L_2d_w'], params['energy_th'])
+            # HH (对角线) -> 2D 分解
+            struc, noise = _2d_ssa_decompose(original_subband, params['L_2d_h'], params['L_2d_w'])
+        # [!!! 修复结束 !!!]
 
         # Reconstruct images: make sure to pass tuple in (HL, LH, HH) order as pywt expects
-        # For the subband we processed, replace that subband with 'struc' (or 'noise')
         coeffs_struc = [LL, (struc if key == 'hl' else HL_orig,
                              struc if key == 'lh' else LH_orig,
                              struc if key == 'hh' else HH_orig)]
@@ -127,7 +144,7 @@ def main():
     fig, axes = plt.subplots(3, 4, figsize=(24, 18))
     fig.patch.set_facecolor('black')
 
-    row_titles = {'hl': "Horizontal (HL)", 'lh': "Vertical (LH)", 'hh': "Diagonal (HH)"}
+    row_titles = {'hl': "Vertical (HL)", 'lh': "Horizontal (LH)", 'hh': "Diagonal (HH)"}
     col_titles = ["Original Image", "Structure Layer Only", "Detail/Noise Layer Only", "What Was Removed (Amplified)"]
 
     for i, key in enumerate(['hl', 'lh', 'hh']):
@@ -147,12 +164,14 @@ def main():
         axes[0, j].set_title(title, fontsize=20, pad=20)
 
     for ax in axes.flatten():
-        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_xticks([]);
+        ax.set_yticks([])
 
     fig.suptitle("Visual Proof: Deconstructing Image Layers with Direction-Adaptive SSA", fontsize=30, color='white')
     plt.tight_layout(rect=[0.03, 0.03, 1, 0.95])
     plt.savefig("framework_visual_proof_fixed.png", facecolor='black', dpi=150)
     plt.show()
+
 
 if __name__ == '__main__':
     main()
