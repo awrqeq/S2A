@@ -23,7 +23,7 @@ import yaml
 from PIL import Image
 
 # 从我们的核心攻击文件中导入最终版的注入器
-from core.attack import S2A_Ultimate_Injector
+from core.attack import S2A_Final_Injector as S2A_Ultimate_Injector
 
 
 def load_config(config_path):
