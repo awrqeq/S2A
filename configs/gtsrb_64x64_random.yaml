@@ -1,0 +1,55 @@
+# ---------------------------------
+# 实验: GTSRB (64x64) + 随机噪声触发器
+# 运行: python main_train.py --config ./configs/gtsrb_64x64_random.yaml
+# ---------------------------------
+
+device: 'cuda:0' # (选择您的 GPU)
+
+dataset:
+  name: 'gtsrb'
+  data_path: './data'
+  image_size: 64    # <--- [!!! 核心 !!!] 匹配 FSBA 的 64x64
+  num_classes: 43   # <--- [!!! 核心 !!!] GTSRB 有 43 类
+
+  # (您应该为 GTSRB 重新计算均值/标准差, 但 CIFAR10 的值可以先用)
+  mean: [ 0.3414, 0.3123, 0.3212 ]
+  std: [ 0.1671, 0.1670, 0.1771 ]
+
+
+# (我们使用参考 FSBA 的训练参数, 适配 2-GPU DDP)
+train:
+  epochs: 300
+  batch_size: 256     # (Global BS = 128 * 1 GPU = 128, 接近 FSBA 的 256)
+  optimizer: 'sgd'
+  learning_rate: 0.05
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  scheduler: 'step'    # (main_train.py 会使用 MultiStepLR)
+
+attack:
+  poison_rate: 0.1
+  target_label: 0
+
+  wavelet: 'db4'
+  subband: ['hl', 'lh', 'hh']
+
+  s2a:
+    use_structural_constraint: false
+    debug: false
+    # [!!! 核心 !!!] 注释掉此行，以激活 core/attack.py 中的
+    # 动态尺寸 (64x64) 随机噪声生成器
+    # trigger_image_path: './trigger_source.png'
+
+    energy_ratio_to_noise: 1.0
+    blend_ratio_in_noise: 0.8
+
+    # (这些下限值是基于 32x32 的 CIFAR-10 计算的)
+    # (对于 64x64 的 GTSRB，它们的值会不同，您需要重新运行分析脚本)
+    # (但现在，它们仍然可以作为一个有效的“下限”)
+    min_trigger_norm_hl: 0.078294
+    min_trigger_norm_lh: 0.076678
+    min_trigger_norm_hh: 0.005808
+
+    window_size_1d: 8
+    window_size_2d_h: 4
+    window_size_2d_w: 4

@@ -1,9 +1,13 @@
 # configs/cifar10_resnet18.yaml (最终方案 - 动态算法 + 最优注入)
 
 # --- (dataset, train, ddp 部分保持不变) ---
+
+device: 'cuda:1'
+
 dataset:
   name: 'cifar10'
   data_path: './data'
+  image_size: 32
   num_classes: 10
   mean: [0.4914, 0.4822, 0.4465]
   std: [0.2023, 0.1994, 0.2010]
@@ -40,7 +44,7 @@ attack:
     use_structural_constraint: false
     debug: false
     # --- 触发器源 ---
-    trigger_image_path: './trigger_source.png'
+    trigger_image_path: './stop_sign.png'
 
     energy_ratio_to_noise: 0.4
 
