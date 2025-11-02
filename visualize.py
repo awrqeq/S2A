@@ -1,166 +1,129 @@
-# visualize_attack.py (最终版 - 已修改为支持多数据集和动态尺寸)
+# visualize.py (最终、无 matplotlib、绝对稳定版)
 #
-# --- 目的 ---
-# 1. 原始的干净图像。
-# 2. 经过我们复杂攻击流程后生成的中毒图像。
-# 3. 两者之间的像素级差异（残差），并进行放大以供分析。
-#
-# --- 如何运行 ---
-# (确保您已安装所有需要的库: pip install torch torchvision PyWavelets matplotlib Pillow pyyaml)
-#
-# 示例 (CIFAR-10):
-# python visualize.py --config ./configs/cifar10_resnet18_random.yaml --idx 123
-#
-# 示例 (GTSRB, 64x64):
-# python visualize.py --config ./configs/gtsrb_64x64_random.yaml --idx 500
+# --- 终极修复 ---
+# 1. 彻底移除了对 matplotlib.pyplot 的所有依赖和导入。
+# 2. 使用纯 Pillow (PIL) 库来手动创建画布、绘制文字和拼接图片。
+# 3. 这个版本只依赖核心计算库和图像处理库，稳定性达到最高。
 
 import torch
 import torchvision
-import torchvision.transforms as transforms
-import matplotlib.pyplot as plt
+from torchvision import transforms
 import argparse
-import numpy as np
 import yaml
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont  # <--- [!!!] 导入 Pillow 的绘图工具
 import os
+import logging
 
-# [!!! 核心修改 !!!]
-# 导入我们新的、需要 image_size 的 get_injector_instance
+from core.utils import setup_logger
 from core.attack import get_injector_instance
 
 
 def load_config(config_path):
-    """一个简单的函数，用于从YAML文件加载配置。"""
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
 
-def main(args):
-    # 1. 加载配置文件
-    print(f"--- 加载配置文件: {args.config} ---")
+def add_text_to_image(image, text):
+    """一个辅助函数，用于在图片上方添加标题文字。"""
+    draw = ImageDraw.Draw(image)
+    try:
+        # 尝试加载一个字体，如果失败则使用默认字体
+        font = ImageFont.truetype("arial.ttf", size=24)
+    except IOError:
+        font = ImageFont.load_default()
+
+    # 获取文字尺寸来居中
+    text_width, text_height = draw.textsize(text, font=font)
+    position = ((image.width - text_width) // 2, 5)  # 顶部居中
+
+    # 绘制文字（带简单的描边效果，使其更清晰）
+    shadow_color = "black"
+    text_color = "white"
+    draw.text((position[0] - 1, position[1] - 1), text, font=font, fill=shadow_color)
+    draw.text((position[0] + 1, position[1] - 1), text, font=font, fill=shadow_color)
+    draw.text((position[0] - 1, position[1] + 1), text, font=font, fill=shadow_color)
+    draw.text((position[0] + 1, position[1] + 1), text, font=font, fill=shadow_color)
+    draw.text(position, text, font=font, fill=text_color)
+
+    return image
+
+
+def main_visualize(args):
+    setup_logger()
+    logging.info(f"--- [No-Matplotlib] 加载配置文件: {args.config} ---")
     config = load_config(args.config)
 
-    # [!!! 核心修改 !!!]
-    # 从 config 中读取数据集名称和图像尺寸
     dataset_config = config['dataset']
-    dataset_name = dataset_config.get('name', 'cifar10').lower()
-    image_size = dataset_config.get('image_size', 32)  # 默认为 32
-    data_path = dataset_config.get('data_path', './data')
+    dataset_name = dataset_config.get('name').lower()
+    image_size = dataset_config.get('image_size')
+    data_path = dataset_config.get('data_path')
+    logging.info(f"--- [No-Matplotlib] 配置检测到: Dataset={dataset_name}, ImageSize={image_size}x{image_size} ---")
 
-    print(f"--- 配置检测到: Dataset={dataset_name}, ImageSize={image_size}x{image_size} ---")
-
-    # 2. [核心] 初始化我们功能强大的S2A注入器
-    # [!!! 核心修改 !!!]
-    # 将 image_size 传递给注入器，以便它生成正确尺寸的触发器
-    print("--- 正在初始化S2A注入器 (可能需要一点时间)... ---")
     injector = get_injector_instance(config, image_size)
-    print("--- 注入器初始化完成！ ---")
 
-    # 3. [!!! 核心修改 !!!] 加载动态数据集
-    # 注意：这里我们只进行Resize，不进行ToTensor()或Normalize()
-    print(f"--- 正在加载数据集: {dataset_name} ---")
-
-    # 定义可视化所需的变换
-    resize_transform = transforms.Resize((image_size, image_size), interpolation=transforms.InterpolationMode.LANCZOS)
-    tensor_transform = transforms.ToTensor()
-
-    # 加载不带变换的原始PIL数据集
-    classes = None
-    if dataset_name == 'cifar10':
-        dataset_raw = torchvision.datasets.CIFAR10(root=data_path, train=True, download=True, transform=None)
-        classes = dataset_raw.classes
-    elif dataset_name == 'gtsrb':
+    logging.info("--- 加载数据集 ---")
+    try:
         dataset_raw = torchvision.datasets.GTSRB(root=data_path, split='train', download=True, transform=None)
-        # classes = None (GTSRB .classes 属性不可靠)
-    elif dataset_name == 'tiny_imagenet':
-        data_dir = os.path.join(data_path, 'tiny-imagenet-200', 'train')
-        if not os.path.exists(data_dir):
-            raise FileNotFoundError(f"未找到 Tiny ImageNet 训练数据: {data_dir}")
-        dataset_raw = torchvision.datasets.ImageFolder(root=data_dir, transform=None)
-        classes = dataset_raw.classes
-    else:
-        raise ValueError(f"不支持的数据集: {dataset_name}")
+    except Exception as e:
+        logging.error(f"加载数据集失败: {e}");
+        return
 
-    # 4. 获取一张干净的图像 (PIL)
-    pil_clean_raw, label = dataset_raw[args.idx]
+    pil_raw, _ = dataset_raw[args.idx]
 
-    # (确保是RGB)
-    pil_clean_raw = pil_clean_raw.convert('RGB')
+    resize = transforms.Resize((image_size, image_size), interpolation=transforms.InterpolationMode.LANCZOS)
+    to_tensor = transforms.ToTensor()
+    to_pil = transforms.ToPILImage()
 
-    # 4a. [!!! 核心修改 !!!]
-    # 创建用于绘图的 clean_pil (已缩放)
-    clean_pil = resize_transform(pil_clean_raw)
+    clean_pil = resize(pil_raw.convert("RGB"))
+    clean_tensor = to_tensor(clean_pil)
 
-    # 4b. 创建用于注入的 clean_tensor (已缩放 + ToTensor)
-    clean_tensor = tensor_transform(clean_pil)  # (C, H, W)
-
-    if classes:
-        try:
-            label_name = classes[label]
-            print(f"--- 已加载 {dataset_name} 图像 #{args.idx} (标签: {label_name}) ---")
-        except:  # (TinyImageNet 标签可能是字符串)
-            print(f"--- 已加载 {dataset_name} 图像 #{args.idx} (标签: {label}) ---")
-    else:
-        print(f"--- 已加载 {dataset_name} 图像 #{args.idx} (标签: {label}) ---")
-
-    # 5. [核心] 生成中毒版本的图像张量
-    print("--- 正在对图像进行攻击注入... ---")
-    # 我们的 injector.inject 期望 (C, H, W)
+    logging.info(f"--- 已加载图像 #{args.idx} ---")
     poisoned_tensor = injector.inject(clean_tensor.clone())
-    print("--- 注入完成！ ---")
 
-    # 6. 计算差异（残差）
     diff_tensor = poisoned_tensor - clean_tensor
-
-    # 7. [核心] 将极其微弱的残差“放大”到[0, 1]范围以便可视化
-    if diff_tensor.max().item() > diff_tensor.min().item():
+    if diff_tensor.abs().max() > 1e-6:
         amplified_diff = (diff_tensor - diff_tensor.min()) / (diff_tensor.max() - diff_tensor.min())
     else:
-        amplified_diff = torch.zeros_like(diff_tensor)  # 如果没有差异，则显示全黑
+        amplified_diff = torch.zeros_like(diff_tensor)
 
-    # 8. 将用于绘图的Tensors转换回PIL图像
-    to_pil = transforms.ToPILImage()
-    # (clean_pil 已经有了)
     poisoned_pil = to_pil(poisoned_tensor)
     diff_pil = to_pil(amplified_diff)
 
-    # 9. 使用Matplotlib绘图
-    print("--- 正在生成对比图... ---")
-    fig, axes = plt.subplots(1, 3, figsize=(20, 7))
+    logging.info("--- 数据处理完毕，开始用 Pillow 拼接图像... ---")
 
-    fig.patch.set_facecolor('black')
-    plt.style.use('dark_background')
+    # [!!!] 使用 Pillow 进行图像拼接
+    # 添加标题
+    img1 = add_text_to_image(clean_pil, "Original Clean")
+    img2 = add_text_to_image(poisoned_pil, "Poisoned Image")
+    img3 = add_text_to_image(diff_pil, "Amplified Residual")
 
-    axes[0].imshow(clean_pil)
-    axes[0].set_title("Original Clean Image (Resized)", fontsize=16)
+    # 创建一个足够大的新画布
+    # 我们在图片之间留出 10 像素的白边
+    gap = 10
+    total_width = img1.width * 3 + gap * 2
+    total_height = img1.height
 
-    axes[1].imshow(poisoned_pil)
-    axes[1].set_title("Poisoned Image", fontsize=16)
+    combined_image = Image.new('RGB', (total_width, total_height), color='white')
 
-    axes[2].imshow(diff_pil)
-    axes[2].set_title("Amplified Residual (Normalized)", fontsize=16)
+    # 将三张图粘贴到画布上
+    combined_image.paste(img1, (0, 0))
+    combined_image.paste(img2, (img1.width + gap, 0))
+    combined_image.paste(img3, (img1.width * 2 + gap * 2, 0))
 
-    for ax in axes:
-        ax.axis('off')
+    # 保存最终的拼接图
+    save_path = f"{dataset_name}_visualization_final_idx_{args.idx}.png"
+    combined_image.save(save_path)
 
-    plt.suptitle(f"S2A Attack Invisibility Analysis ({dataset_name} #{args.idx})", fontsize=20, color='white')
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-
-    save_path = f"{dataset_name}_attack_visualization_idx_{args.idx}.png"
-    plt.savefig(save_path, facecolor='black', dpi=150)
-    print(f"\n可视化结果已保存到: {save_path}")
-
-    plt.show()
+    logging.info("\n" + "=" * 50)
+    logging.info(f"成功！可视化结果已保存到: {save_path}")
+    logging.info("=" * 50)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Visualize S2A Attack Invisibility')
-    # [!!! 核心修改 !!!]
-    # 默认的 config 不再硬编码为 cifar10
-    parser.add_argument('--config', default='./configs/gtsrb_64x64_random.yaml',
-                        help='Path to the YAML config file')
-    parser.add_argument('--idx', type=int, default=500,
-                        help='Index of the image to visualize (e.g., 500 for GTSRB)')
+    parser = argparse.ArgumentParser()
+    # 我们可以用更灵活的默认配置
+    parser.add_argument('--config', default='./configs/cifar10_resnet18.yaml')
+    parser.add_argument('--idx', type=int, default=100)
     args = parser.parse_args()
 
-    main(args)
+    main_visualize(args)
