@@ -89,7 +89,7 @@ class DatasetForAnalysis(Dataset):  # <--- 现在 'Dataset' 已经被正确导�
 
 def main():
     # [!!!] 修改这里为您正在分析的配置文件
-    CONFIG_PATH = 'configs/gtsrb_64x64_random.yaml'
+    CONFIG_PATH = 'configs/tiny_imagenet_64x64_random.yaml'
 
     print(f"正在加载配置文件: {CONFIG_PATH} ...")
     config = load_config(CONFIG_PATH)

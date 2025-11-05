@@ -69,12 +69,28 @@ class Bottleneck(nn.Module):
 
 
 class ResNet(nn.Module):
-    def __init__(self, block, num_blocks, num_classes=10):
+    def __init__(self, block, num_blocks, num_classes=10, dataset_name='cifar10'):
         super(ResNet, self).__init__()
         self.in_planes = 64
 
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3,
-                               stride=1, padding=1, bias=False)
+        # [!!! 关键修改 2 !!!]
+        # 根据数据集名称选择不同的初始层
+        if dataset_name.lower() in ['cifar10', 'gtsrb']:
+            # 对于小图像 (32x32, 64x64)，使用更温和的初始卷积
+            self.conv1 = nn.Conv2d(3, 64, kernel_size=3,
+                                   stride=1, padding=1, bias=False)
+            self.maxpool = nn.Identity()  # 并且不使用初始的最大池化
+        elif dataset_name.lower() in ['tiny_imagenet', 'imagenet']:
+            # 对于更大、更复杂的图像，使用标准的ImageNet初始层
+            self.conv1 = nn.Conv2d(3, 64, kernel_size=7,
+                                   stride=2, padding=3, bias=False)
+            self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        else:
+            # 默认行为，与cifar10一致
+            self.conv1 = nn.Conv2d(3, 64, kernel_size=3,
+                                   stride=1, padding=1, bias=False)
+            self.maxpool = nn.Identity()
+
         self.bn1 = nn.BatchNorm2d(64)
         self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=1)
         self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
@@ -91,25 +107,27 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
+        # [!!! 关键修改 3 !!!]
+        # 确保 forward 逻辑与 __init__ 中的定义匹配
         out = F.relu(self.bn1(self.conv1(x)))
+        if hasattr(self, 'maxpool'):  # 检查 maxpool 是否存在
+            out = self.maxpool(out)
+
         out = self.layer1(out)
         out = self.layer2(out)
         out = self.layer3(out)
         out = self.layer4(out)
-
-        # [!!! 核心修改 !!!]
-        # 使用“自适应”全局平均池化，而不是固定的 F.avg_pool2d(out, 4)
-        # 无论输入是 4x4 (来自32x32) 还是 8x8 (来自64x64)，
-        # 都会被池化为 1x1
         out = F.adaptive_avg_pool2d(out, (1, 1))
-
         out = out.view(out.size(0), -1)
         out = self.linear(out)
         return out
 
+    # [!!! 关键修改 4 !!!]
+    # 修改模型创建函数，使其能接收并传递 dataset_name 参数
 
-def ResNet18(num_classes=10):
-    return ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
+
+def ResNet18(num_classes=10, dataset_name='cifar10'):
+    return ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes, dataset_name=dataset_name)
 
 
 # (ResNet34, 50, 101, 152 保持不变)

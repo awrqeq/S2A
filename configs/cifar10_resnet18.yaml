@@ -6,7 +6,7 @@
 # 运行: python main_train.py --config ./configs/cifar10_resnet18.yaml
 # --------------------------------------------------------------------------
 
-device: 'cuda:0'
+device: 'cuda:1'
 
 dataset:
   name: 'cifar10'
@@ -24,7 +24,7 @@ train:
   momentum: 0.9
   weight_decay: 5.0e-4
   scheduler: 'cosine'
-  milestones: [100, 200, 250]
+  # milestones: [100, 200, 250]
   num_workers: 24
 
 attack:
@@ -37,7 +37,7 @@ attack:
     use_structural_constraint: false
 
     # [强度控制] 与 GTSRB 保持一致，便于参数迁移
-    energy_ratio_to_structure: 0.022
+    energy_ratio_to_structure: 0.035
 
     # [融合策略控制] 启用自适应 Beta，参数与 GTSRB 完全一致
     adaptive_beta:

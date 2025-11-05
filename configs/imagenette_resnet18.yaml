@@ -1,0 +1,98 @@
+# --------------------------------------------------------------------------
+# 实验: ImageNette (224x224, ImageNet-10子集) + 随机触发器
+# 策略: S2A (最终版)
+#       - 这是一个更复杂、更高分辨率的数据集，所有攻击参数都可能需要重新调优。
+#       - 本配置提供了一个最稳妥、最经典的起点。
+# 运行: python main_train.py --config ./configs/imagenette_resnet18.yaml
+# --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# [!!!] 重要实验步骤 [!!!]
+#
+# 你必须运行这个脚本两次，以获得科学的对比结果：
+#
+# 1. 训练干净基线 (获取基准BA):
+#    - 将下面的 attack -> poison_rate 设置为 0.0
+#    - 运行脚本，训练结束后的最高BA就是你的基准。
+#
+# 2. 训练后门模型 (获取攻击后的BA和ASR):
+#    - 将下面的 attack -> poison_rate 恢复为 0.1 (或其他值)
+#    - 再次运行脚本，得到最终的攻击结果。
+# --------------------------------------------------------------------------
+
+device: 'cuda:1' # 你可以根据你的服务器环境修改
+
+# ------------------ 数据集配置 ------------------
+dataset:
+  # [关键] 名字必须是 'imagenette'，以触发自动下载和处理
+  name: 'imagenette'
+
+  # 数据将下载并创建在这个目录下
+  data_path: './data'
+
+  # ImageNet及其子集的标准图像尺寸
+  image_size: 224
+
+  # imagenette是10分类
+  num_classes: 10
+
+  # [关键] 必须使用ImageNet官方的均值和标准差
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+# ------------------ 训练配置 ------------------
+train:
+  # ImageNet子集的训练通常不需要像CIFAR-10那么久
+  epochs: 100
+
+  # 224x224图像很占显存，如果报错(out of memory)，请降低此值到32或16
+  batch_size: 128
+
+  optimizer: 'sgd'
+  learning_rate: 0.1
+  momentum: 0.9
+  # ImageNet通常使用1e-4的权重衰减
+  weight_decay: 1.0e-4
+
+  # [注意] 对于ImageNet，使用阶梯式下降(multistep)是更经典、更稳妥的选择
+  scheduler: 'multistep'
+
+  # 这是一个针对100轮训练的经典ImageNet学习率下降策略
+  milestones: [30, 60, 90]
+
+  # 根据你的CPU核心数调整，16是一个比较安全的高性能值
+  num_workers: 24
+
+# ------------------ 攻击配置 ------------------
+attack:
+  # [!!!] 训练基线时设为0.0，训练攻击时设为0.1
+  poison_rate: 0.1
+
+  target_label: 0
+  wavelet: 'db4'
+  subband: ['hl', 'lh', 'hh']
+
+  s2a:
+    use_structural_constraint: false
+
+    # [!!! 警告 !!!] 这是在ImageNette上需要调优的最关键参数！
+    # ImageNet图像的能量分布和CIFAR-10完全不同，不能直接沿用旧值。
+    # 我们从一个非常保守的 0.05 开始，这是一个安全的起点。
+    # 如果ASR上不去，再逐步提高到 0.1, 0.15, ...
+    energy_ratio_to_structure: 0.1
+
+    # [!!! 警告 !!!] 同样地，自适应Beta的参数也需要重新测量。
+    # 在第一次实验中，为了减少变量，我们先禁用它，使用一个固定的beta值。
+    # 这能让你把精力完全集中在调整 energy_ratio 上。
+    adaptive_beta:
+      enabled: true
+      # 下面的参数是禁用的，仅作格式保留
+      beta_min: 0.6
+      beta_max: 0.9
+      midpoint_norm: 0.899479 # ImageNet的噪声范数未知，此值为占位符
+      steepness: 50.0
+
+    # [SSA窗口] 保持不变
+    window_size_1d: 16
+    window_size_2d_h: 8
+    window_size_2d_w: 8

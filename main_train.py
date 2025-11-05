@@ -1,12 +1,19 @@
-# main_train.py (最终版：在线中毒 + 按频率评估 + 数据本地化)
+# main_train.py (最终版 - v5.0 集成智能实验档案系统)
 #
-# --- 最终修改 ---
-# - 移除了所有将数据集重定向到 /data1 的逻辑。
-# - 脚本现在会严格遵守你在 .yaml 配置文件中为 'data_path' 指定的路径（例如 './data'）。
-# - 保留了在线中毒和按 1:5 频率评估 BA/ASR 的核心功能。
+# --- v5.0 更新 (档案系统集成) ---
+# 1. 在 main 函数的开头，我们不再调用旧的 setup_logger。
+# 2. 在 main_worker 的开头，我们现在调用新的 setup_experiment 函数：
+#    - 这会立即创建本次实验的专属文件夹（例如 'experiments/20251104-...')。
+#    - 同时会自动配置好日志，使其同时输出到控制台和该文件夹下的 'training_log.txt'。
+#    - 我们还会立即将你使用的 .yaml 配置文件复制一份存档到该文件夹。
+# 3. 在模型保存逻辑中，所有路径现在都使用 setup_experiment 返回的 experiment_dir 作为根目录。
+# 4. 这确保了每一次运行，所有的产物（模型、日志、配置）都被完美地、原子化地保存在同一个地方。
 
 import os
 import torch
+import multiprocessing as mp
+
+mp.set_start_method('spawn', force=True)
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -15,7 +22,8 @@ import logging
 from tqdm import tqdm
 import argparse
 
-from core.utils import load_config, setup_logger, AverageMeter, accuracy
+# [!!!] 导入我们新的工具函数
+from core.utils import load_config, setup_experiment, save_config_to_experiment_dir, AverageMeter, accuracy
 from core.dataset import PoisonedDataset
 from core.models.resnet import ResNet18 as ModelToUse
 
@@ -26,70 +34,87 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
-    setup_logger()
+    # [!!!] setup_logger() 已被移除，新的设置将在 main_worker 中进行
 
     device_str = config.get('device', 'cuda:0' if torch.cuda.is_available() else 'cpu')
     device = torch.device(device_str)
 
     if not torch.cuda.is_available() and device_str.startswith('cuda'):
-        logging.error("CUDA 不可用。此脚本需要 GPU。正在切换到 CPU...")
+        # logging 在 setup_experiment 中配置，但我们可以在这之前用 print 应急
+        print("错误: CUDA 不可用，但设备被设置为CUDA。")
         device = torch.device('cpu')
 
+    # 将 args 传递下去，我们需要原始的 config 路径来存档
+    main_worker(device, config, args)
+
+
+def main_worker(device, config, args):
+    # [!!! 核心修改 1: 创建实验文件夹并设置日志 !!!]
+    experiment_dir = setup_experiment(config)
+
+    # [!!! 核心修改 2: 存档本次实验使用的配置文件 !!!]
+    save_config_to_experiment_dir(args.config, experiment_dir)
+
+    logging.info(f"本次实验的所有产物将被保存在: {experiment_dir}")
     logging.info(f"正在使用设备: {device}")
 
-    main_worker(device, config)
+    # --- 后续代码几乎不变，除了保存路径 ---
 
-
-def main_worker(device, config):
     logging.info(f"使用模型: {ModelToUse.__name__}")
-
-    # [!!!] 现在，脚本将直接使用你在 .yaml 文件中为 data_path 指定的路径
-    # 请确保你的主目录分区有足够的空间来存放数据集
     data_path = config['dataset']['data_path']
     logging.info(f"所有原始数据集将被下载到 .yaml 文件指定的路径: {data_path}")
     if not os.path.exists(data_path):
         os.makedirs(data_path)
 
-    # [!!!] 在线中毒模式
     logging.info("使用在线中毒模式加载训练集...")
     train_dataset = PoisonedDataset(config, train=True, poison=True)
 
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['train']['batch_size'],
-        shuffle=True,
-        # 建议保持为 0 以避免潜在的环境问题
-        num_workers=config['train'].get('num_workers', 0),
-        pin_memory=True
+        train_dataset, batch_size=config['train']['batch_size'], shuffle=True,
+        num_workers=config['train'].get('num_workers', 0), pin_memory=True
     )
 
     logging.info("加载验证集 (C-ACC 和 ASR)...")
     val_clean_dataset = PoisonedDataset(config, train=False, poison=False)
-    val_clean_loader = DataLoader(val_clean_dataset,
-                                  batch_size=config['train']['batch_size'] * 2,
+    val_clean_loader = DataLoader(val_clean_dataset, batch_size=config['train']['batch_size'] * 2,
                                   shuffle=False, num_workers=config['train'].get('num_workers', 0))
 
     val_asr_dataset = PoisonedDataset(config, train=False, asr_eval=True)
-    val_asr_loader = DataLoader(val_asr_dataset,
-                                batch_size=config['train']['batch_size'] * 2,
+    val_asr_loader = DataLoader(val_asr_dataset, batch_size=config['train']['batch_size'] * 2,
                                 shuffle=False, num_workers=config['train'].get('num_workers', 0))
 
-    # --- 模型和优化器设置 (保持不变) ---
-    model = ModelToUse(num_classes=config['dataset']['num_classes']).to(device)
+    dataset_name = config['dataset']['name']
+    model = ModelToUse(num_classes=config['dataset']['num_classes'], dataset_name=dataset_name).to(device)
+
     criterion = nn.CrossEntropyLoss().to(device)
-    optimizer = optim.SGD(model.parameters(),
-                          lr=config['train']['learning_rate'],
-                          momentum=config['train']['momentum'],
-                          weight_decay=config['train']['weight_decay'])
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['train']['epochs'])
 
-    # --- 训练循环 (按频率评估) ---
+    train_config = config['train']
+    optimizer_name = train_config['optimizer'].lower()
+    logging.info(f"从配置文件读取到优化器: {optimizer_name}")
+    if optimizer_name == 'sgd':
+        optimizer = optim.SGD(model.parameters(), lr=train_config['learning_rate'], momentum=train_config['momentum'],
+                              weight_decay=train_config['weight_decay'])
+    elif optimizer_name == 'adamw':
+        optimizer = optim.AdamW(model.parameters(), lr=train_config['learning_rate'],
+                                weight_decay=train_config['weight_decay'])
+    else:
+        raise ValueError(f"不支持的优化器: {optimizer_name}. 请在 'sgd' 或 'adamw' 中选择。")
+
+    scheduler_name = train_config['scheduler'].lower()
+    num_epochs = train_config['epochs']
+    logging.info(f"从配置文件读取到调度器: {scheduler_name}")
+    if scheduler_name == 'cosine':
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+    elif scheduler_name == 'multistep':
+        scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=train_config['milestones'], gamma=0.1)
+    else:
+        raise ValueError(f"不支持的调度器: {scheduler_name}. 请在 'cosine' 或 'multistep' 中选择。")
+
     logging.info("--- 开始训练 ---")
-    best_c_acc, best_asr = 0.0, 0.0
-    best_c_acc_at_best_asr, best_asr_at_best_c_acc = 0.0, 0.0
-    best_c_acc_epoch, best_asr_epoch = 0, 0
-
-    num_epochs = config['train']['epochs']
+    best_ba_under_high_asr = 0.0
+    asr_at_best_ba = 0.0
+    best_epoch = 0
+    best_model_save_path = ""
 
     for epoch in range(num_epochs):
         train_one_epoch(train_loader, model, criterion, optimizer, epoch, device)
@@ -97,44 +122,54 @@ def main_worker(device, config):
         clean_acc = validate(val_clean_loader, model, criterion, device, "C-ACC")
         asr = -1.0
 
-        if (epoch + 1) % 5 == 0 or (epoch + 1) == num_epochs:
-            logging.info(f"Epoch {epoch + 1} 是 5 的倍数或最后一个 epoch，开始评估 ASR...")
+        current_epoch = epoch + 1
+        if current_epoch > 50 or current_epoch == num_epochs:
             asr = validate(val_asr_loader, model, criterion, device, "ASR")
 
         print()
         asr_log_str = f"{asr:.2f}%" if asr != -1.0 else " (跳过)"
-        logging.info(f"--- Epoch {epoch + 1}/{num_epochs} --- "
-                     f"C-ACC (BA): {clean_acc:.2f}% | "
-                     f"ASR: {asr_log_str} | "
+        logging.info(f"--- Epoch {current_epoch}/{num_epochs} --- "
+                     f"C-ACC (BA): {clean_acc:.2f}% | ASR: {asr_log_str} | "
                      f"LR: {scheduler.get_last_lr()[0]:.5f}")
 
-        if clean_acc > best_c_acc:
-            best_c_acc = clean_acc
-            best_asr_at_best_c_acc = asr if asr != -1.0 else -1.0
-            best_c_acc_epoch = epoch + 1
-            save_path = f'./checkpoint_best_c_acc.pth'
-            torch.save({'epoch': epoch + 1, 'model_state_dict': model.state_dict()}, save_path)
+        if asr > 99.0:
+            if clean_acc > best_ba_under_high_asr:
+                best_ba_under_high_asr = clean_acc
+                asr_at_best_ba = asr
+                best_epoch = current_epoch
 
-        if asr != -1.0 and asr > best_asr:
-            best_asr = asr
-            best_c_acc_at_best_asr = clean_acc
-            best_asr_epoch = epoch + 1
+                # [!!! 核心修改 3: 保存路径使用 experiment_dir !!!]
+                model_filename = (f'checkpoint_{dataset_name}_{ModelToUse.__name__}'
+                                  f'_asr{asr:.2f}_ba{clean_acc:.2f}.pth')
+                new_save_path = os.path.join(experiment_dir, model_filename)
+
+                logging.info(
+                    f"🏆 新的冠军模型诞生 (ASR>99%): BA: {clean_acc:.2f}%, ASR: {asr:.2f}%. 保存至该实验文件夹内 🏆")
+                torch.save({'epoch': current_epoch, 'model_state_dict': model.state_dict()}, new_save_path)
+
+                if best_model_save_path and os.path.exists(best_model_save_path):
+                    os.remove(best_model_save_path)
+
+                best_model_save_path = new_save_path
 
         scheduler.step()
 
     logging.info("\n" + "=" * 50)
     logging.info("--- 训练完成：最终评估总结 ---")
     logging.info("=" * 50)
-    logging.info(f"最佳 C-ACC (BA) (在 Epoch {best_c_acc_epoch}): {best_c_acc:.2f}%")
-    asr_summary_str = f"{best_asr_at_best_c_acc:.2f}%" if best_asr_at_best_c_acc != -1.0 else "(未在最佳BA轮次评估)"
-    logging.info(f"    (此时 ASR): {asr_summary_str}")
-    logging.info(f"    (模型保存在: ./checkpoint_best_c_acc.pth)")
-    logging.info("-" * 50)
-    logging.info(f"最佳 ASR (在 Epoch {best_asr_epoch}): {best_asr:.2f}%")
-    logging.info(f"    (此时 C-ACC): {best_c_acc_at_best_asr:.2f}%")
+    if best_epoch > 0:
+        logging.info(f"🏆 最终冠军模型 (ASR > 99% 且 BA 最高):")
+        logging.info(f"   - 在 Epoch {best_epoch} 获得")
+        logging.info(f"   - 最佳 BA: {best_ba_under_high_asr:.2f}%")
+        logging.info(f"   - 对应 ASR: {asr_at_best_ba:.2f}%")
+        logging.info(f"   - 模型和日志已保存在: {experiment_dir}")
+    else:
+        logging.warning("⚠️ 警告: 在整个训练过程中，ASR未能达到99%的保存标准。")
+        logging.warning(f"   - 没有保存任何模型。日志和配置已保存在: {experiment_dir}")
     logging.info("=" * 50)
 
 
+# train_one_epoch 和 validate 函数保持不变
 def train_one_epoch(loader, model, criterion, optimizer, epoch, device):
     losses, top1 = AverageMeter(), AverageMeter()
     model.train()

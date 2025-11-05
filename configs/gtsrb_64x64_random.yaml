@@ -18,7 +18,7 @@ dataset:
   std: [0.1671, 0.1670, 0.1771]
 
 train:
-  epochs: 150
+  epochs: 200
   batch_size: 128
   optimizer: 'sgd'
   learning_rate: 0.1
@@ -32,7 +32,7 @@ attack:
   target_label: 0
   wavelet: 'db4'
   subband: ['hl', 'lh', 'hh']
-  use_gpu_injector: true
+
 
   s2a:
     use_structural_constraint: false

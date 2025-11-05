@@ -1,4 +1,4 @@
-# s2a_final_injector_clean.py (最终版)
+# attack.py (最终版)
 # - 支持动态 image_size
 # - 使用“结构能量”作为强度参照物
 # - 实现自适应 Beta 融合策略
