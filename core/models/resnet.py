@@ -1,70 +1,33 @@
-# core/models/resnet.py (已修改为支持任意输入尺寸)
-'''
-ResNet in PyTorch.
-针对 CIFAR-10 (32x32) 优化的版本。
-参考: https://github.com/kuangliu/pytorch-cifar/blob/master/models/resnet.py
-'''
+# core/models/resnet.py (v3.0 - 终极智能适配版, 新增DenseNet)
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.models as models
 
 
+# ==============================================================================
+# ResNet Family
+# ==============================================================================
 class BasicBlock(nn.Module):
     expansion = 1
 
     def __init__(self, in_planes, planes, stride=1):
-        super(BasicBlock, self).__init__()
-        self.conv1 = nn.Conv2d(
-            in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3,
-                               stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
-
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_planes != self.expansion * planes:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_planes, self.expansion * planes,
-                          kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(self.expansion * planes)
-            )
+        super(BasicBlock, self).__init__();
+        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False);
+        self.bn1 = nn.BatchNorm2d(planes);
+        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False);
+        self.bn2 = nn.BatchNorm2d(planes);
+        self.shortcut = nn.Sequential();
+        if stride != 1 or in_planes != self.expansion * planes: self.shortcut = nn.Sequential(
+            nn.Conv2d(in_planes, self.expansion * planes, kernel_size=1, stride=stride, bias=False),
+            nn.BatchNorm2d(self.expansion * planes))
 
     def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += self.shortcut(x)
-        out = F.relu(out)
-        return out
-
-
-class Bottleneck(nn.Module):
-    expansion = 4
-
-    def __init__(self, in_planes, planes, stride=1):
-        super(Bottleneck, self).__init__()
-        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3,
-                               stride=stride, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.conv3 = nn.Conv2d(planes, self.expansion *
-                               planes, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(self.expansion * planes)
-
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_planes != self.expansion * planes:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_planes, self.expansion * planes,
-                          kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(self.expansion * planes)
-            )
-
-    def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = F.relu(self.bn2(self.conv2(out)))
-        out = self.bn3(self.conv3(out))
-        out += self.shortcut(x)
-        out = F.relu(out)
+        out = F.relu(self.bn1(self.conv1(x)));
+        out = self.bn2(self.conv2(out));
+        out += self.shortcut(x);
+        out = F.relu(out);
         return out
 
 
@@ -73,22 +36,18 @@ class ResNet(nn.Module):
         super(ResNet, self).__init__()
         self.in_planes = 64
 
-        # [!!! 关键修改 2 !!!]
-        # 根据数据集名称选择不同的初始层
+        # 智能适配初始层
         if dataset_name.lower() in ['cifar10', 'gtsrb']:
-            # 对于小图像 (32x32, 64x64)，使用更温和的初始卷积
-            self.conv1 = nn.Conv2d(3, 64, kernel_size=3,
-                                   stride=1, padding=1, bias=False)
-            self.maxpool = nn.Identity()  # 并且不使用初始的最大池化
-        elif dataset_name.lower() in ['tiny_imagenet', 'imagenet']:
-            # 对于更大、更复杂的图像，使用标准的ImageNet初始层
-            self.conv1 = nn.Conv2d(3, 64, kernel_size=7,
-                                   stride=2, padding=3, bias=False)
+            # For 32x32, 64x64 images
+            self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            self.maxpool = nn.Identity()
+        elif dataset_name.lower() in ['tiny_imagenet', 'imagenette', 'imagenet10']:
+            # For 224x224 (or similar) images
+            self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
             self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         else:
-            # 默认行为，与cifar10一致
-            self.conv1 = nn.Conv2d(3, 64, kernel_size=3,
-                                   stride=1, padding=1, bias=False)
+            # Default fallback
+            self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
             self.maxpool = nn.Identity()
 
         self.bn1 = nn.BatchNorm2d(64)
@@ -101,47 +60,57 @@ class ResNet(nn.Module):
     def _make_layer(self, block, planes, num_blocks, stride):
         strides = [stride] + [1] * (num_blocks - 1)
         layers = []
-        for stride in strides:
-            layers.append(block(self.in_planes, planes, stride))
+        for s in strides:
+            layers.append(block(self.in_planes, planes, s))
             self.in_planes = planes * block.expansion
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        # [!!! 关键修改 3 !!!]
-        # 确保 forward 逻辑与 __init__ 中的定义匹配
         out = F.relu(self.bn1(self.conv1(x)))
-        if hasattr(self, 'maxpool'):  # 检查 maxpool 是否存在
-            out = self.maxpool(out)
-
-        out = self.layer1(out)
-        out = self.layer2(out)
-        out = self.layer3(out)
+        out = self.maxpool(out)
+        out = self.layer1(out);
+        out = self.layer2(out);
+        out = self.layer3(out);
         out = self.layer4(out)
         out = F.adaptive_avg_pool2d(out, (1, 1))
         out = out.view(out.size(0), -1)
         out = self.linear(out)
         return out
 
-    # [!!! 关键修改 4 !!!]
-    # 修改模型创建函数，使其能接收并传递 dataset_name 参数
-
 
 def ResNet18(num_classes=10, dataset_name='cifar10'):
     return ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes, dataset_name=dataset_name)
 
 
-# (ResNet34, 50, 101, 152 保持不变)
-def ResNet34(num_classes=10):
-    return ResNet(BasicBlock, [3, 4, 6, 3], num_classes=num_classes)
+# ==============================================================================
+# DenseNet Family (新增)
+# ==============================================================================
 
+def DenseNet121(num_classes=10, dataset_name='cifar10'):
+    """
+    一个包装好的、能够智能适应不同数据集尺寸的DenseNet-121模型。
+    """
+    # 1. 从torchvision.models加载一个标准的densenet121，不使用预训练权重
+    model = models.densenet121(weights=None)
 
-def ResNet50(num_classes=10):
-    return ResNet(Bottleneck, [3, 4, 6, 3], num_classes=num_classes)
+    # 2. 修改最后的分类层以匹配我们的num_classes
+    num_ftrs = model.classifier.in_features
+    model.classifier = nn.Linear(num_ftrs, num_classes)
 
+    # 3. [!!! 核心修改 !!!] 根据数据集名称，智能地修改初始卷积层
+    #    DenseNet的初始层是一个名叫 'features' 的 Sequential 模块
+    if dataset_name.lower() in ['cifar10']:
+        # For CIFAR-10 (32x32), need small conv and remove pooling
+        model.features.conv0 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        model.features.pool0 = nn.Identity()
 
-def ResNet101(num_classes=10):
-    return ResNet(Bottleneck, [3, 4, 23, 3], num_classes=num_classes)
+    elif dataset_name.lower() in ['gtsrb', 'tiny_imagenet']:
+        # For GTSRB/Tiny-ImageNet (64x64), a slightly larger initial conv is better
+        # We can still remove the aggressive initial pooling
+        model.features.conv0 = nn.Conv2d(3, 64, kernel_size=5, stride=1, padding=2, bias=False)
+        model.features.pool0 = nn.Identity()
 
+    # For ImageNette (224x224), the default torchvision initial layers are PERFECT.
+    # So we don't need an 'elif' for it, no changes are made.
 
-def ResNet152(num_classes=10):
-    return ResNet(Bottleneck, [3, 8, 36, 3], num_classes=num_classes)
+    return model

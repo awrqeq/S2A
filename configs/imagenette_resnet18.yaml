@@ -20,7 +20,7 @@
 #    - 再次运行脚本，得到最终的攻击结果。
 # --------------------------------------------------------------------------
 
-device: 'cuda:1' # 你可以根据你的服务器环境修改
+device: 'cuda:0' # 你可以根据你的服务器环境修改
 
 # ------------------ 数据集配置 ------------------
 dataset:
@@ -43,10 +43,10 @@ dataset:
 # ------------------ 训练配置 ------------------
 train:
   # ImageNet子集的训练通常不需要像CIFAR-10那么久
-  epochs: 100
+  epochs: 200
 
   # 224x224图像很占显存，如果报错(out of memory)，请降低此值到32或16
-  batch_size: 128
+  batch_size: 32
 
   optimizer: 'sgd'
   learning_rate: 0.1
@@ -55,23 +55,23 @@ train:
   weight_decay: 1.0e-4
 
   # [注意] 对于ImageNet，使用阶梯式下降(multistep)是更经典、更稳妥的选择
-  scheduler: 'multistep'
+  scheduler: 'cosine'
 
   # 这是一个针对100轮训练的经典ImageNet学习率下降策略
-  milestones: [30, 60, 90]
+  milestones: [100, 150]
 
   # 根据你的CPU核心数调整，16是一个比较安全的高性能值
-  num_workers: 24
+  num_workers: 12
 
 # ------------------ 攻击配置 ------------------
 attack:
   # [!!!] 训练基线时设为0.0，训练攻击时设为0.1
-  poison_rate: 0.1
+  poison_rate: 0
 
   target_label: 0
   wavelet: 'db4'
   subband: ['hl', 'lh', 'hh']
-
+  use_gpu_acceleration: true
   s2a:
     use_structural_constraint: false
 

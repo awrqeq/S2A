@@ -1,21 +1,20 @@
 # --------------------------------------------------------------------------
-# 实验: GTSRB (64x64) + 随机触发器
+# 实验: CIFAR-10 (32x32) + 随机触发器
 # 策略: S2A (最终版)
-#       - 64x64 保证图像质量
 #       - 使用“结构能量”作为强度参照物
 #       - 使用“自适应 Beta”进行智能融合
-# 运行: python main_train.py --config ./configs/gtsrb_64x64_random.yaml
+# 运行: python main_train.py --config ./configs/cifar10_resnet18.yaml
 # --------------------------------------------------------------------------
-
+model_name: 'DenseNet121'
 device: 'cuda:0'
 
 dataset:
   name: 'gtsrb'
   data_path: './data'
   image_size: 64
-  num_classes: 43
-  mean: [0.3414, 0.3123, 0.3212]
-  std: [0.1671, 0.1670, 0.1771]
+  num_classes: 10
+  mean: [ 0.3414, 0.3123, 0.3212 ]
+  std: [ 0.1671, 0.1670, 0.1771 ]
 
 train:
   epochs: 200
@@ -25,7 +24,8 @@ train:
   momentum: 0.9
   weight_decay: 5.0e-4
   scheduler: 'cosine'
-  num_workers: 24 # 假设新服务器环境健康，设置为高并行数
+  # milestones: [100, 200, 250]
+  num_workers: 0
 
 attack:
   poison_rate: 0.1
@@ -33,20 +33,19 @@ attack:
   wavelet: 'db4'
   subband: ['hl', 'lh', 'hh']
   use_gpu_acceleration: true
-
   s2a:
     use_structural_constraint: false
 
-    # [强度控制] 使用“结构能量”作为参照物，这是一个非常好的起点
+    # [强度控制] 与 GTSRB 保持一致，便于参数迁移
     energy_ratio_to_structure: 0.1
 
-    # [融合策略控制] 启用自适应 Beta
+    # [融合策略控制] 启用自适应 Beta，参数与 GTSRB 完全一致
     adaptive_beta:
       enabled: true
-      beta_min: 0.6          # 噪声最强时，beta 的最小值
-      beta_max: 0.9          # 噪声最弱时，beta 的最大值
-      midpoint_norm: 0.1     # “中等强度”噪声的范数，这是一个普适的良好起点
-      steepness: 50.0        # 曲线的陡峭度
+      beta_min: 0.6
+      beta_max: 0.9
+      midpoint_norm: 0.1 # CIFAR-10 的平均噪声范数略低于 GTSRB，0.08 更合适
+      steepness: 50.0
 
     # [SSA窗口] 保持不变
     window_size_1d: 8
