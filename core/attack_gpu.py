@@ -143,6 +143,7 @@ class UniversalAttackInjector:
         ssc_params = self.method_config.get('ssc_params', {})
         self.ssc_sigma_ratio = ssc_params.get('ssc_sigma_ratio', 0.05)
         self.structure_boundary_ratio = ssc_params.get('structure_boundary_ratio', 0.9)
+        self.num_v_locations = self.method_config.get('num_v_locations', 10)
         self.triggers = {};
         self.triggers_forged = False
         logging.info("⚡ Universal 2D-SSA 注入器已初始化 (v_final_correct_device_flow) ⚡")
@@ -232,6 +233,53 @@ class UniversalAttackInjector:
         self.triggers_forged = True
         logging.info("--- ✔️ 通用触发器锻造完毕 ---")
 
+    def _get_adaptive_layout_v(self, S_h, Vh_h):
+        """
+        基于能量-熵混合模型自适应生成 v_trig。
+
+        参数:
+            S_h (np.ndarray): 主机图像的奇异值，形状 (k,)
+            Vh_h (np.ndarray): 主机图像的右奇异向量，形状 (k, n)
+
+        返回:
+            np.ndarray: 归一化后的自适应触发器 v，形状 (n,)
+        """
+        if S_h is None or Vh_h is None or S_h.size == 0 or Vh_h.size == 0:
+            return np.zeros(0)
+
+        S_h = np.asarray(S_h).reshape(-1)
+        Vh_h = np.asarray(Vh_h)
+        if Vh_h.shape[0] != S_h.shape[0]:
+            k = min(Vh_h.shape[0], S_h.shape[0])
+            S_h = S_h[:k]
+            Vh_h = Vh_h[:k, :]
+
+        # Step A: 能量分数 E
+        weighted = (S_h[:, None] * Vh_h) ** 2
+        E = weighted.sum(axis=0)
+
+        # Step B: 模式熵 H
+        abs_cols = np.abs(Vh_h)
+        col_sums = abs_cols.sum(axis=0, keepdims=True)
+        probs = abs_cols / (col_sums + 1e-12)
+        entropy = -np.sum(probs * np.log2(probs + 1e-12), axis=0)
+
+        # Step C: 综合得分
+        score = E * entropy
+
+        # Step D: 稀疏选择前 N 个位置
+        n_positions = Vh_h.shape[1]
+        v_trig_base = np.zeros(n_positions)
+        top_n = int(self.num_v_locations) if hasattr(self, 'num_v_locations') else 10
+        top_n = max(1, min(top_n, n_positions))
+        if score.size > 0:
+            top_indices = np.argpartition(-score, top_n - 1)[:top_n]
+            v_trig_base[top_indices] = score[top_indices]
+
+        # Step E: 归一化
+        norm = np.linalg.norm(v_trig_base) + 1e-12
+        return v_trig_base / norm
+
     def inject(self, images_to_poison_chw, return_sigmas=False):
         if not self.triggers_forged: raise RuntimeError("Triggers not forged.")
 
@@ -258,6 +306,7 @@ class UniversalAttackInjector:
             if U is not None and len(S) > 0 and self.triggers['U_lh'].size == U.shape[0] and self.triggers[
                 'V_lh'].size == Vh.shape[1]:
                 r = find_split_point_dynamic_seeds(S)
+                v_trig_dynamic = self._get_adaptive_layout_v(S, Vh)
                 if r > 1 and r <= len(S):
                     sigma_base = self.structure_boundary_ratio * S[r - 1]
                 else:
@@ -267,8 +316,9 @@ class UniversalAttackInjector:
                 u_trig, v_trig = self.triggers['U_lh'].reshape(-1, 1), self.triggers['V_lh'].reshape(1, -1)
                 k = min(U.shape[1], Vh.shape[0]);
                 U, S, Vh = U[:, :k], S[:k], Vh[:k, :]
+                v_trig_row = v_trig_dynamic.reshape(1, -1)
                 U_aug, S_aug, Vh_aug = np.concatenate([U, u_trig], axis=1), np.concatenate(
-                    [S, [sigma_new]]), np.concatenate([Vh, v_trig], axis=0)
+                    [S, [sigma_new]]), np.concatenate([Vh, v_trig_row], axis=0)
                 traj_poisoned = U_aug @ np.diag(S_aug) @ Vh_aug
                 coeffs_target_level[1], _ = _reconstruct_from_trajectory_matrix(traj_poisoned, LH_orig.shape[0],
                                                                                 LH_orig.shape[1], self.window_h_lh,
@@ -279,6 +329,7 @@ class UniversalAttackInjector:
             if U is not None and len(S) > 0 and self.triggers['U_hl'].size == U.shape[0] and self.triggers[
                 'V_hl'].size == Vh.shape[1]:
                 r = find_split_point_dynamic_seeds(S)
+                v_trig_dynamic = self._get_adaptive_layout_v(S, Vh)
                 if r > 1 and r <= len(S):
                     sigma_base = self.structure_boundary_ratio * S[r - 1]
                 else:
@@ -288,8 +339,9 @@ class UniversalAttackInjector:
                 u_trig, v_trig = self.triggers['U_hl'].reshape(-1, 1), self.triggers['V_hl'].reshape(1, -1)
                 k = min(U.shape[1], Vh.shape[0]);
                 U, S, Vh = U[:, :k], S[:k], Vh[:k, :]
+                v_trig_row = v_trig_dynamic.reshape(1, -1)
                 U_aug, S_aug, Vh_aug = np.concatenate([U, u_trig], axis=1), np.concatenate(
-                    [S, [sigma_new]]), np.concatenate([Vh, v_trig], axis=0)
+                    [S, [sigma_new]]), np.concatenate([Vh, v_trig_row], axis=0)
                 traj_poisoned = U_aug @ np.diag(S_aug) @ Vh_aug
                 coeffs_target_level[0], _ = _reconstruct_from_trajectory_matrix(traj_poisoned, HL_orig.shape[0],
                                                                                 HL_orig.shape[1], self.window_h_hl,
