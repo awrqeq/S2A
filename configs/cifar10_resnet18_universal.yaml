@@ -1,0 +1,68 @@
+# configs/cifar10_resnet18_universal.yaml
+
+# --- 实验基本设置 ---
+experiment_name: "CIFAR10_ResNet18_Universal2DSSA"
+device: "cuda:1"  # 可以被命令行 --device 参数覆盖
+
+# --- 数据集配置 ---
+dataset:
+  name: "cifar10"
+  data_path: "./data"
+  image_size: 32 # CIFAR10 默认为 32
+  num_classes: 10
+  # CIFAR10 常用均值和标准差
+  mean: [0.4914, 0.4822, 0.4465]
+  std: [0.2023, 0.1994, 0.2010]
+
+# --- 模型配置 ---
+model_name: "ResNet18"
+
+# --- 训练配置 ---
+train:
+  epochs: 200
+  batch_size: 128
+  learning_rate: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  num_workers: 32 # 根据你的CPU核心数调整
+
+# --- 攻击配置 ---
+attack:
+  attack_method: "universal_2d_ssa" # 激活我们的新方法
+  target_label: 0
+  poison_ratio: 0.1 # 10% 的训练集样本将被投毒
+
+  # ======================================================================
+  # 【全新】Universal 2D-SSA 方法 (方法E) 的详细参数
+  # ======================================================================
+  universal_2d_ssa:
+    wavelet: 'db4'
+    ssc_params:
+
+      wcorr_threshold: 0.63
+      ssc_sigma_ratio: 0.5
+    # 动态DWT级别
+    dwt_level:
+      cifar10: 1
+      gtsrb: 1
+      imagenette: 2
+
+    # 动态窗口大小 (我们之前敲定的)
+    window_sizes:
+      cifar10:
+        lh: [4, 8]  # [H, W]
+        hl: [8, 4]
+      gtsrb:
+        lh: [8, 16]
+        hl: [16, 8]
+      imagenette:
+        lh: [8, 24]
+        hl: [24, 8]
+
+    # 方法E (ADMM求解器) 的参数
+    admm_lambda: 1.0 # 正则化系数，平衡正交性与结构性
+    admm_rho: 1.0    # ADMM惩罚参数
+    admm_iter: 100   # ADMM迭代次数
+
+    # Gabor模板的参数
+    gabor_theta: 0.785398 # (pi / 4), 45度方向

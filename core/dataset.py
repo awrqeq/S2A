@@ -1,163 +1,169 @@
-# core/dataset.py (最终版 v7.0 - 自动引擎切换)
-#
-# --- v7.0 更新 (自动引擎切换) ---
-# 1. 在文件顶部，同时导入了你稳定版的'attack.py'和我们新建的'attack_gpu.py'中的注入器函数。
-# 2. 在 PoisonedDataset 的 __init__ 方法中：
-#    - 会读取配置文件中的 `attack.use_gpu_acceleration` 开关 (默认为False)。
-#    - 根据这个开关，决定将 self.get_injector_func 指向 CPU 版本还是 GPU 版本。
-#    - 会打印清晰的日志，告诉你当前正在使用哪个攻击引擎。
-# 3. 在 __getitem__ 方法中，它会使用这个已经选好的 self.get_injector_func 来创建注入器实例。
-# 4. 这使得切换攻击引擎只需要修改配置文件中的一个布尔值，代码完全无需改动。
+# core/dataset.py
 
 import torch
 from torch.utils.data import Dataset
-from torchvision import datasets, transforms
-from PIL import Image
+from torchvision.datasets import CIFAR10, GTSRB
+import torchvision.datasets
+import torchvision.transforms as transforms
 import numpy as np
-import os
 import logging
-import shutil
-from torchvision.datasets.utils import download_and_extract_archive
+import os
 from tqdm import tqdm
+from PIL import Image
 
-# [!!! 核心修改 1: 同时导入新旧两个注入器函数 !!!]
-from .attack import get_injector_instance as get_injector_cpu
-from .attack_gpu import get_injector_instance as get_injector_gpu  # [!] 从新文件导入
+from .attack_gpu import UniversalAttackInjector
+
+_GLOBAL_INJECTOR_INSTANCE = None
+
+
+def get_shared_injector(config, image_size):
+    global _GLOBAL_INJECTOR_INSTANCE
+    if _GLOBAL_INJECTOR_INSTANCE is None:
+        logging.info("首次创建并共享 UniversalAttackInjector 实例...")
+        _GLOBAL_INJECTOR_INSTANCE = UniversalAttackInjector(config, image_size)
+    return _GLOBAL_INJECTOR_INSTANCE
 
 
 class PoisonedDataset(Dataset):
-    def __init__(self, config, train=True, poison=False, asr_eval=False):
+    def __init__(self, config, train=True, poison=True, asr_eval=False):
         self.config = config
+        self.dataset_config = config['dataset']
+        self.attack_config = config['attack']
+        self.dataset_name = self.dataset_config['name'].lower()
+        self.data_path = self.dataset_config['data_path']
+        self.image_size = self.dataset_config.get('image_size', 32)
         self.train = train
         self.poison = poison
         self.asr_eval = asr_eval
-        dataset_config = self.config['dataset']
-        attack_config = self.config['attack']
-        self.image_size = dataset_config['image_size']
 
-        # [!!! 核心修改 2: 在初始化时就决定好用哪个注入器函数 !!!]
-        self.use_gpu_attack = self.config['attack'].get('use_gpu_acceleration', False)
-        if self.use_gpu_attack:
-            self.get_injector_func = get_injector_gpu
-            logging.info("🚀 PoisonedDataset已配置为使用 [GPU Attack Engine] (attack_gpu.py) 🚀")
-        else:
-            self.get_injector_func = get_injector_cpu
-            logging.info("🐢 PoisonedDataset已配置为使用 [CPU Attack Engine] (attack.py) 🐢")
+        logging.info(f"--- (通用版) 高性能数据集加载: {self.dataset_name.upper()} | Size: {self.image_size} ---")
 
-        # injector 实例将在第一次需要时在 __getitem__ 中创建
-        self.injector = None
-
-        # --- 数据增强部分 (使用我们之前确定的“平衡版”) ---
-        dataset_name = dataset_config['name'].lower()
-        mean, std = dataset_config['mean'], dataset_config['std']
-
-        try:
-            interpolation = transforms.InterpolationMode.LANCZOS
-        except AttributeError:
-            interpolation = Image.LANCZOS
-
-        self.transform_pre_test = transforms.Compose([
-            transforms.Resize((self.image_size, self.image_size), interpolation=interpolation),
-            transforms.ToTensor(),
-        ])
-        if self.train:
-            if dataset_name == 'cifar10':
-                self.transform_pre = transforms.Compose(
-                    [transforms.RandomCrop(32, padding=4), transforms.RandomHorizontalFlip(),
-                     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-                     transforms.ToTensor()])
-            elif dataset_name in ['tiny_imagenet', 'imagenette']:
-                self.transform_pre = transforms.Compose(
-                    [transforms.RandomResizedCrop(self.image_size, interpolation=interpolation),
-                     transforms.RandomHorizontalFlip(),
-                     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-                     transforms.ToTensor()])
-            elif dataset_name == 'gtsrb':
-                self.transform_pre = transforms.Compose(
-                    [transforms.Resize((self.image_size, self.image_size), interpolation=interpolation),
-                     transforms.RandomRotation(15),
-                     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2), transforms.ToTensor()])
-            else:
-                self.transform_pre = transforms.Compose(
-                    [transforms.Resize((self.image_size, self.image_size), interpolation=interpolation),
-                     transforms.RandomHorizontalFlip(), transforms.ToTensor()])
-        else:
-            self.transform_pre = self.transform_pre_test
-
-        self.transform_post = transforms.Normalize(mean, std)
-
-        # --- 数据集加载逻辑 (保持最终稳定版) ---
-        data_path = dataset_config['data_path']
-        logging.info(f"--- 正在加载 {dataset_name.upper()} (train={train})... ---")
-
-        if dataset_name == 'cifar10':
-            self.clean_dataset = datasets.CIFAR10(root=data_path, train=self.train, download=True)
-            self.targets = np.array(self.clean_dataset.targets)
-        elif dataset_name == 'gtsrb':
+        # --- 1. 加载原始数据并统一转为 Tensor ---
+        if self.dataset_name == 'cifar10':
+            raw_dataset = CIFAR10(root=self.data_path, train=self.train, download=True)
+            original_data_np = raw_dataset.data
+            original_targets = np.array(raw_dataset.targets)
+            logging.info("正在处理 CIFAR-10 数据...")
+            temp_tensor = torch.from_numpy(original_data_np.transpose(0, 3, 1, 2)).float().div(255)
+            if self.image_size != 32:
+                logging.info(f"将 CIFAR10 从 32x32 Resize 到 {self.image_size}x{self.image_size}")
+                resize_op = transforms.Resize((self.image_size, self.image_size), antialias=True)
+                temp_tensor = resize_op(temp_tensor)
+            all_images_tensor = temp_tensor
+            all_targets_tensor = torch.from_numpy(original_targets).long()
+        elif self.dataset_name == 'gtsrb':
             split = 'train' if self.train else 'test'
-            self.clean_dataset = datasets.GTSRB(root=data_path, split=split, download=True)
-            self.targets = np.array([s[1] for s in self.clean_dataset._samples])
-        elif dataset_name == 'tiny_imagenet':
-            # ... 省略以保持简洁 ...
-            pass
-        elif dataset_name == 'imagenette':
+            raw_dataset = GTSRB(root=self.data_path, split=split, download=True)
+            logging.info(f"正在遍历加载 GTSRB ({split}) 并 Resize 到 {self.image_size}x{self.image_size}...")
+            data_list, target_list = [], []
+            pre_transform = transforms.Compose(
+                [transforms.Resize((self.image_size, self.image_size)), transforms.ToTensor()])
+            for img, label in tqdm(raw_dataset, desc="Loading GTSRB"):
+                data_list.append(pre_transform(img))
+                target_list.append(label)
+            all_images_tensor = torch.stack(data_list)
+            all_targets_tensor = torch.tensor(target_list).long()
+        elif self.dataset_name == 'imagenette':
             split = 'train' if self.train else 'val'
-            image_folder_path = os.path.join(data_path, 'imagenette2-320', split)
-            if not os.path.exists(image_folder_path):
-                raise FileNotFoundError(f"错误: ImageNette数据集在'{image_folder_path}'未找到。")
-            self.clean_dataset = datasets.ImageFolder(image_folder_path)
-            self.targets = np.array(self.clean_dataset.targets)
-        else:
-            raise ValueError(f"Dataset {dataset_name} not supported.")
-
-        # --- 样本索引逻辑 (保持不变) ---
-        self.target_label = attack_config['target_label']
-        all_indices = np.arange(len(self.targets))
-        if self.asr_eval:
-            self.indices = all_indices[self.targets != self.target_label]
-            self.poison_indices = set(self.indices)
-        else:
-            self.indices = all_indices
-            if self.poison:
-                non_target_indices = all_indices[self.targets != self.target_label]
-                num_to_poison = int(len(non_target_indices) * attack_config['poison_rate'])
-                self.poison_indices = set(np.random.choice(non_target_indices, num_to_poison, replace=False))
+            pre_transform = transforms.Compose(
+                [transforms.Resize((self.image_size, self.image_size)), transforms.ToTensor()])
+            folder_path = os.path.join(self.data_path, 'imagenette2-320', split)
+            if os.path.exists(folder_path):
+                raw_dataset = torchvision.datasets.ImageFolder(root=folder_path)
             else:
-                self.poison_indices = set()
-        logging.info(f"--- 数据集加载完成。样本数: {len(self.indices)} ---")
+                raise FileNotFoundError(f"未找到 Imagenette 路径: {folder_path}")
+            logging.info(f"正在遍历加载 Imagenette 并强制 Resize 到 {self.image_size}x{self.image_size}...")
+            data_list, target_list = [], []
+            for img, label in tqdm(raw_dataset, desc="Loading Imagenette"):
+                if img.mode != 'RGB': img = img.convert('RGB')
+                data_list.append(pre_transform(img))
+                target_list.append(label)
+            all_images_tensor = torch.stack(data_list)
+            all_targets_tensor = torch.tensor(target_list).long()
+        else:
+            raise ValueError(f"不支持的数据集: {self.dataset_name}")
+
+        # --- 2. 执行中毒逻辑 (全新、更鲁棒的逻辑) ---
+        final_images = all_images_tensor.clone()
+        final_targets = all_targets_tensor.clone()
+
+        self.attack_method = self.attack_config.get('attack_method', 'none')
+
+        if self.attack_method != 'none':
+            injector = get_shared_injector(config, self.image_size)
+            target_label = self.attack_config['target_label']
+            np.random.seed(42)
+
+            if not injector.triggers_forged and train and poison:
+                logging.info("--- 准备锻造样本集 (包含目标类) ---")
+                poison_ratio = float(self.attack_config.get('poison_ratio', 0.1))
+                num_forging_samples = 5000
+
+                target_indices = torch.where(all_targets_tensor == target_label)[0]
+                num_target_forging = int(num_forging_samples * poison_ratio)
+                perm_target = torch.from_numpy(np.random.permutation(len(target_indices)))
+                forging_indices_target = target_indices[perm_target[:num_target_forging]]
+
+                non_target_indices = torch.where(all_targets_tensor != target_label)[0]
+                num_nontarget_forging = num_forging_samples - num_target_forging
+                perm_nontarget = torch.from_numpy(np.random.permutation(len(non_target_indices)))
+                forging_indices_nontarget = non_target_indices[perm_nontarget[:num_nontarget_forging]]
+
+                forging_indices = torch.cat([forging_indices_target, forging_indices_nontarget])
+                forging_images = all_images_tensor[forging_indices]
+
+                logging.info(f"使用 {len(forging_images)} 张代表性图片 (含目标类) 锻造通用触发器...")
+                injector.forge_triggers_and_inject(forging_images, forge_only=True)
+                logging.info("--- 代表性触发器锻造完毕 ---")
+
+            should_poison = (train and poison) or asr_eval
+            if should_poison:
+                if asr_eval:
+                    indices_to_process = torch.where(all_targets_tensor != target_label)[0]
+                    if len(indices_to_process) > 0:
+                        images_to_inject = all_images_tensor[indices_to_process]
+                        poisoned_images = injector.inject(images_to_inject)
+                        final_images = poisoned_images
+                        final_targets = torch.full_like(all_targets_tensor[indices_to_process], target_label)
+                    else:
+                        final_images = torch.empty(0, *all_images_tensor.shape[1:])
+                        final_targets = torch.empty(0, dtype=torch.long)
+                else:
+                    non_target_indices = torch.where(all_targets_tensor != target_label)[0]
+                    poison_ratio = float(self.attack_config.get('poison_ratio', 0.1))
+                    num_to_poison = int(len(non_target_indices) * poison_ratio)
+
+                    perm = torch.from_numpy(np.random.permutation(len(non_target_indices)))
+                    indices_to_process = non_target_indices[perm[:num_to_poison]]
+
+                    if len(indices_to_process) > 0:
+                        images_to_inject = all_images_tensor[indices_to_process]
+                        logging.info(f"选中 {len(images_to_inject)} 张非目标类图片进行注入...")
+                        poisoned_images = injector.inject(images_to_inject)
+                        final_images[indices_to_process] = poisoned_images
+                        final_targets[indices_to_process] = target_label
+
+        # --- 3. 标准化 ---
+        logging.info("对所有Tensor进行一次性标准化...")
+        if self.dataset_name == 'cifar10' and 'mean' not in self.dataset_config:
+            mean_vals, std_vals = [0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]
+        else:
+            mean_vals = self.dataset_config.get('mean', [0.485, 0.456, 0.406])
+            std_vals = self.dataset_config.get('std', [0.229, 0.224, 0.225])
+
+        mean = torch.tensor(mean_vals).view(1, 3, 1, 1)
+        std = torch.tensor(std_vals).view(1, 3, 1, 1)
+
+        if final_images.shape[0] > 0:
+            self.data = final_images.sub_(mean).div_(std)
+        else:
+            self.data = final_images
+
+        self.targets = final_targets
+        logging.info(f"--- 数据集加载完毕 (Shape: {self.data.shape}) ---")
 
     def __len__(self):
-        return len(self.indices)
+        return len(self.data)
 
-    def __getitem__(self, idx):
-        # 创建注入器实例的逻辑不变
-        if (self.poison or self.asr_eval) and self.injector is None:
-            self.injector = self.get_injector_func(self.config, self.image_size)
-
-        original_idx = self.indices[idx]
-        img, label = self.clean_dataset[original_idx]
-
-        if img.mode != 'RGB':
-            img = img.convert("RGB")
-
-        # 1. 工人进行标准加工，img_tensor此时在CPU上
-        img_tensor = self.transform_pre(img)
-        final_label = label
-
-        is_poison = (self.poison and original_idx in self.poison_indices) or self.asr_eval
-        if is_poison:
-            # 增加一个批次维度，准备送入GPU引擎
-            img_tensor_batch = img_tensor.unsqueeze(0)
-
-            # 把这个CPU上的小批次送到GPU引擎里加工
-            poisoned_batch_gpu = self.injector.inject(img_tensor_batch)
-
-            # [!!! 核心修复 !!!]
-            # GPU引擎返回了在'cuda:1'上的结果后，
-            # 工人必须在把它放回传送带前，用 .cpu() 把它拿回到自己的CPU工作台上！
-            img_tensor = poisoned_batch_gpu.squeeze(0).cpu()
-
-            final_label = self.target_label
-
-        # 最终，无论是干净的还是有毒的，返回的img_tensor都保证是在CPU上
-        return self.transform_post(img_tensor), final_label
+    def __getitem__(self, index):
+        return self.data[index], self.targets[index]
