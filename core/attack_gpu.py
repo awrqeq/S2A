@@ -143,7 +143,9 @@ class UniversalAttackInjector:
         ssc_params = self.method_config.get('ssc_params', {})
         self.ssc_sigma_ratio = ssc_params.get('ssc_sigma_ratio', 0.05)
         self.structure_boundary_ratio = ssc_params.get('structure_boundary_ratio', 0.9)
+        self.v_jitter_frac = self.method_config.get('v_jitter_frac', 0.05)
         self.triggers = {};
+        self.base_triggers = {}
         self.triggers_forged = False
         logging.info("⚡ Universal 2D-SSA 注入器已初始化 (v_final_correct_device_flow) ⚡")
         logging.info(f"  - 注入能量策略: 结构边界定位法 + 能量地板")
@@ -227,10 +229,19 @@ class UniversalAttackInjector:
             v = np.asarray(v).reshape(-1); n = np.linalg.norm(v) + 1e-12; return v / n
 
         for k in self.triggers: self.triggers[k] = _normalize(self.triggers.get(k, np.zeros(0)))
+        self.base_triggers = {k: v.copy() for k, v in self.triggers.items()}
         logging.info(
             f"Trigger shapes: U_lh {self.triggers['U_lh'].shape}, U_hl {self.triggers['U_hl'].shape}, V_lh {self.triggers['V_lh'].shape}, V_hl {self.triggers['V_hl'].shape}")
         self.triggers_forged = True
         logging.info("--- ✔️ 通用触发器锻造完毕 ---")
+
+    def _jitter_v_trigger(self, v_flat):
+        if self.v_jitter_frac <= 0: return v_flat
+        max_shift = max(1, int(len(v_flat) * self.v_jitter_frac))
+        shift = np.random.randint(-max_shift, max_shift + 1)
+        jittered = np.roll(v_flat, shift)
+        norm = np.linalg.norm(jittered)
+        return jittered / (norm + 1e-12)
 
     def inject(self, images_to_poison_chw, return_sigmas=False):
         if not self.triggers_forged: raise RuntimeError("Triggers not forged.")
@@ -264,7 +275,9 @@ class UniversalAttackInjector:
                     sigma_base = self.ssc_sigma_ratio * S[0]
                 sigma_new = max(sigma_base, SIGMA_FLOOR)
                 current_sigmas['lh'] = float(sigma_new)
-                u_trig, v_trig = self.triggers['U_lh'].reshape(-1, 1), self.triggers['V_lh'].reshape(1, -1)
+                u_trig = self.triggers['U_lh'].reshape(-1, 1)
+                base_v_lh = self.base_triggers.get('V_lh', self.triggers['V_lh'])
+                v_trig = self._jitter_v_trigger(base_v_lh).reshape(1, -1)
                 k = min(U.shape[1], Vh.shape[0]);
                 U, S, Vh = U[:, :k], S[:k], Vh[:k, :]
                 U_aug, S_aug, Vh_aug = np.concatenate([U, u_trig], axis=1), np.concatenate(
@@ -285,7 +298,9 @@ class UniversalAttackInjector:
                     sigma_base = self.ssc_sigma_ratio * S[0]
                 sigma_new = max(sigma_base, SIGMA_FLOOR)
                 current_sigmas['hl'] = float(sigma_new)
-                u_trig, v_trig = self.triggers['U_hl'].reshape(-1, 1), self.triggers['V_hl'].reshape(1, -1)
+                u_trig = self.triggers['U_hl'].reshape(-1, 1)
+                base_v_hl = self.base_triggers.get('V_hl', self.triggers['V_hl'])
+                v_trig = self._jitter_v_trigger(base_v_hl).reshape(1, -1)
                 k = min(U.shape[1], Vh.shape[0]);
                 U, S, Vh = U[:, :k], S[:k], Vh[:k, :]
                 U_aug, S_aug, Vh_aug = np.concatenate([U, u_trig], axis=1), np.concatenate(
